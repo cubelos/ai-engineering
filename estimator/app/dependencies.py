@@ -11,12 +11,14 @@ from app.services.llm_wrapper import LLMWrapper
 
 @lru_cache
 def get_cache() -> EstimationCache:
+    """Return a process-wide :class:`~app.services.cache.EstimationCache` singleton."""
     settings = get_settings()
     return EstimationCache.from_url(settings.REDIS_URL, ttl=settings.CACHE_TTL)
 
 
 @lru_cache
 def get_llm_wrapper() -> LLMWrapper:
+    """Return a process-wide :class:`~app.services.llm_wrapper.LLMWrapper` singleton."""
     settings = get_settings()
     return LLMWrapper(
         openai_api_key=settings.OPENAI_API_KEY,

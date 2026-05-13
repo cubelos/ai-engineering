@@ -1,3 +1,5 @@
+"""Shared pytest fixtures for the estimator test suite."""
+
 import pytest
 from fastapi.testclient import TestClient
 

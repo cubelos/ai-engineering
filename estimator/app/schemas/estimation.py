@@ -1,3 +1,11 @@
+"""Pydantic models for estimation HTTP APIs and internal pipeline types.
+
+``EstimationRequest`` / ``EstimationResponse`` are the public contract for
+``POST /api/v1/estimate``. Additional literals and models support the streaming
+route, canonical example formatting, and post-generation validation.
+"""
+
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -6,53 +14,33 @@ PreprocessingMode = Literal["none", "inline_cleaning", "two_phase"]
 ExampleFormat = Literal["markdown", "json", "narrative"]
 
 
-class EstimationRequest(BaseModel):
-    """Incoming request containing a meeting transcription to estimate."""
+class ProjectType(str, Enum):
+    """Coarse project category injected into prompt templates."""
 
-    transcription: str = Field(..., min_length=50, description="Meeting transcription text")
+    MOBILE_APP = "mobile_app"
+    WEB_SAAS = "web_saas"
+    INTERNAL_TOOL = "internal_tool"
+    DATA_PIPELINE = "data_pipeline"
 
-    preprocessing: PreprocessingMode = Field(
-        default="none",
-        description="Input preprocessing strategy: none | inline_cleaning | two_phase",
-    )
-    example_format: ExampleFormat = Field(
-        default="markdown",
-        description="Format used to render the CAG examples in the system prompt",
-    )
-    num_examples: int = Field(
-        default=3,
-        ge=0,
-        le=5,
-        description="Number of canonical examples to inject (0..N where N=len(CANONICAL_EXAMPLES))",
-    )
-    use_examples: bool = Field(
-        default=True,
-        description="Toggle the CAG examples block on/off (overrides num_examples when False)",
-    )
-    model: str | None = Field(
-        default=None,
-        description="Override the default LLM_MODEL for this request",
-    )
-    max_tokens: int = Field(
-        default=4000,
-        gt=0,
-        le=16000,
-        description="Maximum output tokens for the estimation call",
-    )
-    thinking_budget: int | None = Field(
-        default=None,
-        ge=0,
-        le=16000,
-        description="Extended thinking budget (Anthropic only). Ignored for OpenAI.",
-    )
-    evaluate: bool = Field(
-        default=True,
-        description="Run the structural evaluation on the generated estimation",
-    )
+
+class DetailLevel(str, Enum):
+    """Requested depth of the written estimate."""
+
+    SUMMARY = "summary"
+    MEDIUM = "medium"
+    DETAILED = "detailed"
+
+
+class OutputFormat(str, Enum):
+    """Requested shape of the narrative output (markdown conventions)."""
+
+    PHASES_TABLE = "phases_table"
+    LINE_ITEMS = "line_items"
+    NARRATIVE = "narrative"
 
 
 class TokenUsage(BaseModel):
-    """Token consumption details from the LLM call(s)."""
+    """Token counts returned by the provider (including optional preprocessing)."""
 
     input_tokens: int
     output_tokens: int
@@ -62,7 +50,7 @@ class TokenUsage(BaseModel):
 
 
 class StructureCheck(BaseModel):
-    """Level-1 structural evaluation of the generated estimation."""
+    """Heuristic structural score for generated estimation markdown."""
 
     has_title: bool
     has_breakdown_table: bool
@@ -80,30 +68,56 @@ class StructureCheck(BaseModel):
     issues: list[str]
 
 
-class EstimationResponse(BaseModel):
-    """Response containing the generated estimation and metadata."""
+class EstimationRequest(BaseModel):
+    """Input for ``POST /api/v1/estimate`` — product parameters, not a raw system prompt."""
 
-    estimation: str = Field(..., description="Generated software estimation in markdown")
-    model: str = Field(..., description="LLM model used")
-    provider: str = Field(..., description="LLM provider used")
+    description: str = Field(
+        ...,
+        min_length=20,
+        max_length=50_000,
+        description="Project brief or long transcript (upper bound 50k characters).",
+    )
+    project_type: ProjectType
+    detail_level: DetailLevel
+    output_format: OutputFormat
+    evaluate: bool = Field(
+        default=True,
+        description="When true, run regex/parse validation on the model output.",
+    )
+
+
+class EstimationResponse(BaseModel):
+    """Successful estimation payload returned to HTTP clients."""
+
+    text: str = Field(..., description="Generated estimation (markdown/plain text)")
+    prompt_version: str = Field(
+        ...,
+        description="Template bundle identifier (matches rendered ``estimation/<id>/``).",
+    )
+    model: str = Field(..., description="Resolved model name after routing")
+    provider: str = Field(..., description="Provider id (e.g. openai, anthropic)")
     usage: TokenUsage
-    finish_reason: str = Field(..., description="Stop reason reported by the provider")
-    preprocessing: PreprocessingMode = "none"
+    finish_reason: str = Field(..., description="Provider stop reason")
+    preprocessing: PreprocessingMode = Field(
+        default="none",
+        description="Preprocessing mode recorded for the call (template path uses ``none``).",
+    )
     extracted_requirements: str | None = Field(
         default=None,
-        description="Phase-1 output when preprocessing='two_phase'; null otherwise",
+        description="Populated only when a two-phase transcript pipeline is used.",
     )
-    latency_ms: int = Field(..., description="Server-side total latency in milliseconds")
-    validation: StructureCheck | None = None
-
-    # --- Session 3 — wrapper metadata (additive, defaults preserve Session 2 tests) ---
-    cache_hit: bool = Field(default=False, description="True when the response came from Redis")
-    cost_usd: float = Field(default=0.0, description="Estimated USD cost based on token usage")
+    latency_ms: int = Field(..., description="Wall-clock server latency in milliseconds")
+    validation: StructureCheck | None = Field(
+        default=None,
+        description="Present when ``evaluate`` was true on the request",
+    )
+    cache_hit: bool = Field(default=False, description="Whether the response came from Redis")
+    cost_usd: float = Field(default=0.0, description="Estimated USD spend for the call")
 
 
 class StreamEstimationRequest(BaseModel):
-    """Streaming endpoint request — only the transcription, knobs are not exposed."""
+    """Input for ``POST /api/v1/estimate/stream`` — long transcription plus optional knobs."""
 
-    transcription: str = Field(..., min_length=50, description="Meeting transcription text")
-    model: str | None = Field(default=None, description="Override the default model")
+    transcription: str = Field(..., min_length=50, description="Meeting or brief text to estimate")
+    model: str | None = Field(default=None, description="Override primary/fallback routing target")
     max_tokens: int = Field(default=4000, gt=0, le=16000)

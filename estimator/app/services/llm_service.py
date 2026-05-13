@@ -1,7 +1,12 @@
-"""Estimation orchestration: prompt building, optional preprocessing, and dispatch
-to the LLM. The actual provider calls now live in :mod:`app.services.llm_wrapper`,
-so this module focuses on Session 2 concerns (knobs, prompt assembly) while the
-wrapper handles cache, fallback, and cost tracking transparently.
+"""LLM estimation orchestration: prompt assembly and provider dispatch.
+
+Builds prompts either from **Python** (``build_system_prompt`` + canonical
+examples, used by the streaming endpoint) or from **caller-supplied**
+system/user strings (``generate_estimation_from_prompt_pair``, used by the
+typed ``POST /api/v1/estimate`` route after Jinja rendering).
+
+All paid calls go through :func:`_invoke_llm`, which delegates to
+:class:`~app.services.llm_wrapper.LLMWrapper` (cache, fallback, cost metadata).
 """
 
 from __future__ import annotations
@@ -27,12 +32,8 @@ class LLMServiceError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Prompt building blocks
-#
-# The two ACTIVE_OUTPUT_PROMPT variants live side by side so the instructor
-# can switch between them in the live session (Block 3.4) by editing the
-# ACTIVE_OUTPUT_PROMPT assignment below. Uvicorn `--reload` picks up the
-# change automatically.
+# Default "shape" instructions appended in build_system_prompt().
+# Toggle ACTIVE_OUTPUT_PROMPT to PROMPT_OUTPUT_STRUCTURED for stricter layout.
 # ---------------------------------------------------------------------------
 
 PROMPT_OUTPUT_BASIC = "Generate an estimation for the project described above."
@@ -57,7 +58,7 @@ Generate the estimation with this exact structure:
 - [3-5 bullet points covering technical risks, scope assumptions, and external dependencies]
 """
 
-# >>> Block 3.4 live switch: change the right-hand side to PROMPT_OUTPUT_STRUCTURED
+# Live switch: PROMPT_OUTPUT_BASIC vs PROMPT_OUTPUT_STRUCTURED
 ACTIVE_OUTPUT_PROMPT = PROMPT_OUTPUT_BASIC
 
 
@@ -81,7 +82,11 @@ EXTRACTION_SYSTEM_PROMPT = (
 
 @dataclass
 class GenerationOptions:
-    """Per-request knobs that drive prompt construction and the LLM call."""
+    """Controls preprocessing, example rendering, and generation limits.
+
+    Used by :func:`generate_estimation` (transcript pipeline) and passed through
+    :func:`generate_estimation_from_prompt_pair` for model overrides and caps.
+    """
 
     preprocessing: PreprocessingMode = "none"
     example_format: ExampleFormat = "markdown"
@@ -103,7 +108,29 @@ def build_system_prompt(
     use_examples: bool = True,
     inline_cleaning: bool = False,
 ) -> str:
-    """Assemble the system prompt with role, rates, output spec and (optionally) examples."""
+    """Compose the long system prompt used by the **streaming** estimation path.
+
+    Concatenates role, optional meeting-cleaning hints, rate guidance,
+    :data:`ACTIVE_OUTPUT_PROMPT`, and optional canonical examples from
+    :mod:`app.context.examples`.
+
+    Parameters
+    ----------
+    example_format:
+        Serialization of injected examples (markdown, json, narrative).
+    num_examples:
+        How many canonical examples to include (0 disables the block when
+        combined with ``use_examples``).
+    use_examples:
+        When false, no example block is added regardless of ``num_examples``.
+    inline_cleaning:
+        When true, adds instructions to interpret noisy meeting transcripts.
+
+    Returns
+    -------
+    str
+        Full system message text for ``LLMWrapper.complete`` / ``complete_stream``.
+    """
     role = (
         "You are a senior software consultant with 15+ years of experience in project "
         "estimation. Your task is to produce a detailed software project estimation based "
@@ -145,7 +172,11 @@ def _invoke_llm(
     max_tokens: int,
     thinking_budget: int | None,
 ) -> dict[str, Any]:
-    """Single seam through which every LLM call passes. Tests monkeypatch this."""
+    """Delegate a completion to :class:`~app.services.llm_wrapper.LLMWrapper`.
+
+    This indirection exists so tests can monkeypatch a single function instead
+    of the full wrapper.
+    """
     wrapper = get_llm_wrapper()
     return wrapper.complete(
         system_prompt=system_prompt,
@@ -165,9 +196,13 @@ def extract_requirements(
     transcription: str,
     opts: GenerationOptions,
 ) -> tuple[str, dict, float]:
-    """Run the cheap phase-1 LLM call that turns a raw transcription into clean requirements.
+    """Phase-one call: normalize a raw transcript into a bullet list of requirements.
 
-    Returns ``(requirements_text, usage_dict, cost_usd)``.
+    Returns
+    -------
+    tuple[str, dict, float]
+        ``(requirements_markdown, usage_dict, cost_usd)`` where ``usage_dict``
+        has keys ``input`` and ``output`` token counts for preprocessing only.
     """
     log.info("extracting_requirements", model_override=opts.model)
 
@@ -198,7 +233,30 @@ def generate_estimation(
     transcription: str,
     opts: GenerationOptions | None = None,
 ) -> dict[str, Any]:
-    """Generate a software estimation from a meeting transcription using the configured LLM."""
+    """Transcript-oriented pipeline: Python-built system prompt + optional preprocessing.
+
+    .. note::
+        The public ``POST /api/v1/estimate`` route does **not** call this
+        function; it renders Jinja templates and uses
+        :func:`generate_estimation_from_prompt_pair`. This entry point remains
+        for tooling, experiments, or future endpoints that need two-phase
+        extraction or ``build_system_prompt``-based CAG without templates.
+
+    Parameters
+    ----------
+    transcription:
+        Raw meeting text (or synthesized brief) used as the user message after
+        optional preprocessing.
+    opts:
+        Preprocessing mode, example knobs, model override, token limits.
+
+    Returns
+    -------
+    dict[str, Any]
+        Same shape as :meth:`~app.services.llm_wrapper.LLMWrapper.complete`
+        (``estimation``, ``usage``, ``model``, …) plus ``preprocessing``,
+        ``extracted_requirements``, ``latency_ms``, ``cost_usd``, ``cache_hit``.
+    """
     opts = opts or GenerationOptions()
 
     t0 = time.perf_counter()
@@ -249,6 +307,54 @@ def generate_estimation(
     result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
     result["cost_usd"] = round(float(result.get("cost_usd", 0.0)) + prep_cost, 6)
     # ``cache_hit`` is whatever the wrapper returned for the main estimation call.
+    result.setdefault("cache_hit", False)
+
+    return result
+
+
+def generate_estimation_from_prompt_pair(
+    *,
+    system_prompt: str,
+    user_message: str,
+    opts: GenerationOptions | None = None,
+) -> dict[str, Any]:
+    """Run one completion with explicit system and user strings.
+
+    The wrapper sends them as separate chat roles. Callers (such as the typed
+    estimate route) must not concatenate both into a single user message.
+
+    Preprocessing fields in the returned dict are cleared to ``none`` / null
+    because this path bypasses two-phase extraction.
+    """
+    opts = opts or GenerationOptions()
+    t0 = time.perf_counter()
+
+    log.info(
+        "generating_estimation",
+        prompt_source="jinja2",
+        model_override=opts.model,
+        max_tokens=opts.max_tokens,
+        thinking_budget=opts.thinking_budget,
+    )
+
+    try:
+        result = _invoke_llm(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            model_override=opts.model,
+            max_tokens=opts.max_tokens,
+            thinking_budget=opts.thinking_budget,
+        )
+    except Exception as exc:
+        log.error("llm_call_failed", error=str(exc), error_type=type(exc).__name__)
+        raise LLMServiceError(f"LLM call failed: {exc}") from exc
+
+    result["usage"]["preprocessing_input_tokens"] = 0
+    result["usage"]["preprocessing_output_tokens"] = 0
+    result["preprocessing"] = "none"
+    result["extracted_requirements"] = None
+    result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+    result["cost_usd"] = round(float(result.get("cost_usd", 0.0)), 6)
     result.setdefault("cache_hit", False)
 
     return result

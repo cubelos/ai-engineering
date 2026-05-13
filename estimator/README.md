@@ -1,144 +1,132 @@
-# Estimator CAG - Servicio de Estimacion de Software con IA
+# Estimator CAG — Servicio de estimación de software con IA
 
-Servicio de estimacion de proyectos de software impulsado por IA, utilizando una arquitectura **Cache Augmented Generation (CAG)**.
+ **[ Javier Cubelos Ordás ]** 
 
-## Que es CAG y por que lo usamos
-
-CAG (Cache Augmented Generation) es un patron de arquitectura donde el contexto relevante se inyecta directamente en el prompt del LLM como texto estatico. En esta fase del proyecto, las estimaciones de referencia se incluyen como ejemplos dentro del prompt del sistema, sin necesidad de una base de datos vectorial ni busqueda semantica.
-
-Este enfoque es ideal para empezar porque:
-- Es simple de implementar y depurar
-- No requiere infraestructura adicional (ni embeddings, ni vector stores)
-- Funciona bien cuando el volumen de contexto es manejable (pocos ejemplos)
-
-En modulos posteriores del master, este servicio evolucionara a una arquitectura **RAG** (Retrieval Augmented Generation) con base de datos vectorial para manejar un volumen mayor de ejemplos.
+API **FastAPI** que genera estimaciones de proyectos de software a partir de parámetros tipados (descripción, tipo de proyecto, nivel de detalle, formato de salida), usando **Cache Augmented Generation (CAG)**: el contexto de referencia se inyecta como texto fijo en las plantillas de prompt (directorio `app/prompts/`), sin base de datos vectorial en esta versión.
 
 ## Requisitos previos
 
-- **Docker** y **Docker Compose** instalados
-- Una **API key** de OpenAI o Anthropic
-- Python **NO** es necesario localmente — todo se ejecuta dentro del contenedor
+- **Docker** y **Docker Compose** (recomendado), o Python 3.11 con **uv**
+- Clave de **OpenAI** y/o **Anthropic** (el router puede usar modelo principal y de respaldo)
 
-## Inicio rapido con Docker (recomendado)
-
-1. Clonar el repositorio y entrar al directorio:
-   ```bash
-   cd estimator
-   ```
-
-2. Copiar el archivo de variables de entorno y configurar las API keys:
-   ```bash
-   cp .env.example .env
-   # Editar .env y poner tu API key real
-   ```
-
-3. Construir y levantar el servicio:
-   ```bash
-   docker compose up --build
-   ```
-
-4. El servicio estara disponible en `http://localhost:8000`
-
-## Alternativa: ejecucion local sin Docker
+## Inicio rápido con Docker
 
 ```bash
+cd estimator
+cp .env.example .env
+# Editar .env: API keys, modelos, REDIS_URL si hace falta
+docker compose up --build
+```
+
+La API queda en **[http://localhost:8000](http://localhost:8000)** y Redis en el servicio `redis` (puerto **6379** publicado en el host para inspección con `redis-cli`).
+
+## Ejecución local (sin Docker)
+
+```bash
+cd estimator
 uv sync
-# Configurar .env con tus API keys
+# .env con claves; para caché Redis en el mismo equipo: REDIS_URL=redis://localhost:6379
 uv run uvicorn app.main:app --reload
 ```
 
-## Probar el servicio
+## Uso de la API principal
+
+`POST /api/v1/estimate` acepta un JSON con el contrato `EstimationRequest` (validación Pydantic). La respuesta incluye el texto de la estimación (`text`), la versión de plantillas usada (`prompt_version`), uso de tokens, coste estimado, acierto de caché y, si se pide, resultado de la validación estructural.
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/estimate \
+curl -s -X POST http://localhost:8000/api/v1/estimate \
   -H "Content-Type: application/json" \
   -d '{
-    "transcription": "The client wants to build a mobile app for managing restaurant reservations. They need user registration, a restaurant search with filters by cuisine and location, a real-time reservation system with availability checking, push notifications for reservation confirmations and reminders, and an admin panel for restaurant owners to manage their listings and view analytics."
-  }'
+    "description": "The client wants a mobile app for restaurant reservations: registration, search with filters, real-time availability, push notifications, and an owner admin with basic analytics.",
+    "project_type": "mobile_app",
+    "detail_level": "medium",
+    "output_format": "narrative",
+    "evaluate": true
+  }' | jq '{prompt_version, validation_score: .validation.score, text_preview: .text[0:120]}'
 ```
 
-## Estructura del proyecto
+## Características
+
+- **Plantillas Jinja2** versionadas (`app/prompts/estimation/v1/`) y renderizado centralizado en `app/prompts/loader.py`; el modelo recibe mensajes **system** y **user** separados.
+- **LiteLLM** con modelo principal y **fallback**, tiempo de espera y reintentos configurables.
+- **Caché exact-match** en Redis (clave derivada del system prompt, user message y parámetros de generación).
+- **Streaming SSE**: `POST /api/v1/estimate/stream` para transcripciones largas con emisión token a token.
+- **Ejemplos canónicos** en Python (`app/context/examples.py`) para el prompt ensamblado en código usado por el flujo de streaming.
+- **Validación ligera** del markdown devuelto (tablas, totales, secciones) cuando `evaluate` es verdadero.
+
+## Estructura del repositorio
 
 ```
 estimator/
 ├── app/
-│   ├── main.py            # Aplicacion FastAPI, health check, CORS
-│   ├── config.py           # Configuracion con Pydantic Settings
+│   ├── main.py              # FastAPI, CORS, estáticos, /health
+│   ├── config.py            # Variables de entorno (Pydantic Settings)
+│   ├── dependencies.py      # Caché y wrapper LLM (singletons)
 │   ├── routers/
-│   │   └── estimations.py  # Endpoint POST /api/v1/estimate
+│   │   └── estimations.py   # POST /api/v1/estimate, POST .../estimate/stream
 │   ├── services/
-│   │   └── llm_service.py  # Logica de negocio, llamadas al LLM
+│   │   ├── llm_service.py   # Orquestación y dispatch al wrapper
+│   │   ├── llm_wrapper.py   # LiteLLM, caché, costes
+│   │   ├── cache.py         # Cliente Redis
+│   │   └── evaluation.py    # Comprobaciones estructurales
 │   ├── schemas/
-│   │   └── estimation.py   # Modelos Pydantic (request/response)
-│   └── context/
-│       └── examples.py     # Ejemplos de estimacion (contexto CAG)
+│   │   └── estimation.py    # Request/response Pydantic
+│   ├── prompts/
+│   │   ├── loader.py          # Render system/user + versión
+│   │   └── estimation/v1/     # system.j2, user.j2, examples.j2
+│   ├── context/
+│   │   └── examples.py        # Ejemplos CAG para build_system_prompt
+│   └── fixtures/              # Transcripciones de ejemplo
+├── streamlit_app.py         # Formulario → POST /api/v1/estimate
 ├── tests/
-│   └── test_health.py      # Tests basicos
-├── Dockerfile              # Build multi-stage con uv
-├── docker-compose.yml      # Configuracion para desarrollo local
-└── pyproject.toml          # Dependencias y configuracion
+│   ├── prompts/
+│   │   └── test_estimation_v1.py
+│   └── ...
+├── Dockerfile
+├── docker-compose.yml
+└── pyproject.toml
 ```
 
-## Documentacion interactiva
+## Documentación interactiva
 
-Con el servicio corriendo, accede a la documentacion Swagger UI en:
+Con el servicio en marcha: [Swagger UI](http://localhost:8000/docs) y [ReDoc](http://localhost:8000/redoc).
 
-- **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+## Streaming y demo HTML
 
-## Sesion 3 — LiteLLM, Redis cache, SSE y Streamlit
-
-A partir de la Sesion 3 el servicio incorpora una capa de wrapper sobre el LLM que anade:
-
-- **Fallback de proveedor** (LiteLLM Router) — si el modelo primario falla, se intenta el secundario
-- **Cache exact-match** en Redis — la misma transcripcion no vuelve a pagar tokens
-- **Streaming SSE** — endpoint `POST /api/v1/estimate/stream` que emite los tokens segun llegan
-- **UI Streamlit** — cliente real que consume el endpoint SSE
-
-### Arrancar la stack completa
-
-```bash
-cd estimator
-docker compose up --build
-# La API queda en http://localhost:8000 y Redis en redis://localhost:6379
-```
-
-### Probar el endpoint SSE
-
-Demo HTML: abrir [http://localhost:8000/static/sse_demo.html](http://localhost:8000/static/sse_demo.html).
-
-Desde CLI:
 ```bash
 curl -N -X POST http://localhost:8000/api/v1/estimate/stream \
   -H 'Content-Type: application/json' \
   -d '{"transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks."}'
 ```
 
-### Verificar la cache
+Demo estática: [http://localhost:8000/static/sse_demo.html](http://localhost:8000/static/sse_demo.html) (si existe el directorio `app/static`).
+
+## Caché Redis
+
+Misma petición repetida (mismo cuerpo y mismos prompts efectivos) puede servirse desde Redis y marcar `cache_hit: true` en la respuesta.
 
 ```bash
-# La misma peticion dos veces — la segunda devuelve cache_hit: true
 curl -s localhost:8000/api/v1/estimate -H 'Content-Type: application/json' \
-  -d '{"transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks."}' \
-  | jq '{cache_hit, cost_usd}'
+  -d '{
+    "description": "We need a small CRM with auth, contacts and roles for MVP in about six weeks.",
+    "project_type": "web_saas",
+    "detail_level": "summary",
+    "output_format": "line_items"
+  }'
 
-# Inspeccionar las claves en Redis
 docker compose exec redis redis-cli KEYS 'estimation:*'
 ```
 
-### Streamlit
+Si ejecutas **solo uvicorn en el host**, usa `REDIS_URL=redis://localhost:6379` en `.env` y un Redis local; el hostname `redis` solo resuelve dentro de la red de Compose.
 
-Streamlit corre **fuera** de Docker y consume el endpoint SSE por HTTP:
+## Cliente Streamlit
+
+Interfaz de formulario que envía `EstimationRequest` al endpoint JSON (no sustituye al streaming para demos largas).
 
 ```bash
 cd estimator
 uv sync
 uv run streamlit run streamlit_app.py
-# Abrir http://localhost:8501
 ```
 
-La URL del backend se lee de `ESTIMATOR_API_BASE_URL` (default `http://localhost:8000`).
-
----
-
-> Este proyecto forma parte del **Master en AI Engineering** y servira como base para evolucionar hacia una arquitectura RAG con base de datos vectorial en modulos posteriores.
+Abrir **[http://localhost:8501](http://localhost:8501)**. La URL base de la API se configura con `ESTIMATOR_API_BASE_URL` (por defecto `http://localhost:8000`; en macOS a veces conviene `http://127.0.0.1:8000`).

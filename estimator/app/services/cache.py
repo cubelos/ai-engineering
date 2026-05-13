@@ -1,10 +1,9 @@
 """Exact-match Redis cache for LLM responses.
 
-The cache key is a SHA-256 of the *full* system prompt plus the user message
-plus the generation knobs (model, max_tokens, thinking_budget). That means any
-change in Session 2 controls (preprocessing, num_examples, example_format,
-ACTIVE_OUTPUT_PROMPT) implicitly invalidates the cache without manual flushing,
-because those changes alter the system prompt text.
+The cache key is a SHA-256 of the full system prompt, user message, and
+generation knobs (model, max_tokens, thinking_budget). Any change to prompt
+text or those knobs produces a new key, so stale entries are not reused
+implicitly.
 """
 
 from __future__ import annotations

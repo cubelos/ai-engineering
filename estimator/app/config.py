@@ -6,11 +6,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables and .env file."""
+    """Runtime configuration sourced from environment variables and optional ``.env``."""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # --- Session 2 fields (kept for backwards compatibility with the live demos) ---
+    # Provider credentials and default routing
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
     LLM_PROVIDER: Literal["openai", "anthropic"] = "anthropic"
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "staging", "production"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "DEBUG"
 
-    # --- Session 3 fields (LiteLLM wrapper, Redis cache, Streamlit transport) ---
+    # LiteLLM router and resilience
     PRIMARY_MODEL: str = "gpt-4o-mini"
     FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
     LLM_TIMEOUT: int = 30

@@ -8,12 +8,11 @@ Design notes
   validation, prompt building) stays in ``llm_service.py``.
 - The Router is configured with two deployments under the same ``model_name``
   ("estimator") so LiteLLM can switch from primary to fallback transparently.
-  When the caller overrides the model per-request (Session 2 live demos), we
-  bypass the Router and call ``litellm.completion`` directly with explicit
-  credentials — that path has no fallback by design.
+  When the caller overrides the model per request, the code bypasses the Router
+  and calls ``litellm.completion`` directly with explicit credentials — that path
+  has no fallback by design.
 - The cache key includes the full system prompt and the generation knobs, so any
-  Session 2 toggle (preprocessing, num_examples, ACTIVE_OUTPUT_PROMPT) implicitly
-  invalidates the cache without manual flushing.
+  change to prompt text or parameters invalidates the cache without manual flushing.
 """
 
 from __future__ import annotations

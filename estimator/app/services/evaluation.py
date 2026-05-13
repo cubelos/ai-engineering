@@ -20,11 +20,11 @@ def _to_int(raw: str) -> int | None:
 
 
 def evaluate_estimation_structure(text: str, finish_reason: str) -> StructureCheck:
-    """Run the Level-1 structural checks against a generated estimation.
+    """Score estimation markdown with lightweight structural checks.
 
-    Pure regex/parsing — no LLM call. Used to give the instructor and the
-    students a quick, automatable signal on whether the model produced
-    something well-formed.
+    Uses regular expressions only (no LLM). Detects common sections, parses the
+    task table when present, compares declared totals to row sums, and records
+    whether the provider stop reason looks acceptable.
     """
     has_title = bool(re.search(r"^##\s+\S", text, re.MULTILINE))
     has_breakdown_table = bool(_HEADER_ROW_RE.search(text))

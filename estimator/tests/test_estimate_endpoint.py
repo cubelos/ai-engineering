@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.context.examples import CANONICAL_EXAMPLES
+from app.schemas.estimation import DetailLevel, OutputFormat, ProjectType
 from app.services import llm_service
 
 WELL_FORMED_MD = CANONICAL_EXAMPLES[0].estimation_markdown
@@ -51,88 +52,72 @@ def call_log(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict]]:
     yield calls
 
 
-def test_default_request_returns_validation(client: TestClient, call_log: list[dict]) -> None:
-    payload = {"transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks."}
-    response = client.post("/api/v1/estimate", json=payload)
+def _valid_payload(**overrides: object) -> dict:
+    base = {
+        "description": (
+            "The client needs a reservation mobile app with login, search, "
+            "notifications, and an owner admin panel."
+        ),
+        "project_type": ProjectType.MOBILE_APP.value,
+        "detail_level": DetailLevel.MEDIUM.value,
+        "output_format": OutputFormat.NARRATIVE.value,
+    }
+    return {**base, **overrides}
+
+
+def test_estimate_returns_text_and_prompt_version(client: TestClient, call_log: list[dict]) -> None:
+    response = client.post("/api/v1/estimate", json=_valid_payload())
     assert response.status_code == 200
     body = response.json()
-    assert body["preprocessing"] == "none"
-    assert body["finish_reason"] == "stop"
+    assert "text" in body
+    assert body["prompt_version"] == "v1"
+    assert len(body["text"]) > 0
     assert body["validation"] is not None
     assert body["validation"]["score"] == 1.0
-    assert body["extracted_requirements"] is None
+    assert body["usage"]["input_tokens"] == 1234
     assert body["cache_hit"] is False
     assert body["cost_usd"] == pytest.approx(0.001234)
     assert len(call_log) == 1
+    assert "<project_description>" in call_log[0]["user_message"]
+    assert "reservation mobile app" in call_log[0]["user_message"]
 
 
-def test_two_phase_invokes_llm_twice_and_fills_extracted(
-    client: TestClient, call_log: list[dict]
-) -> None:
-    payload = {
-        "transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks.",
-        "preprocessing": "two_phase",
-    }
-    response = client.post("/api/v1/estimate", json=payload)
+def test_evaluate_false_omits_validation(client: TestClient, call_log: list[dict]) -> None:
+    response = client.post("/api/v1/estimate", json=_valid_payload(evaluate=False))
     assert response.status_code == 200
     body = response.json()
-    assert body["preprocessing"] == "two_phase"
-    assert body["extracted_requirements"] is not None
-    assert len(call_log) == 2
-    # The second call's user message should be the extracted requirements,
-    # not the original transcription.
-    assert call_log[1]["user_message"] == body["extracted_requirements"]
+    assert body["validation"] is None
 
 
-def test_max_tokens_low_propagates_finish_reason_length(
+def test_phases_table_format_propagates_to_system_prompt(
     client: TestClient, call_log: list[dict]
 ) -> None:
-    payload = {
-        "transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks.",
-        "max_tokens": 200,
-    }
-    response = client.post("/api/v1/estimate", json=payload)
+    response = client.post(
+        "/api/v1/estimate",
+        json=_valid_payload(output_format=OutputFormat.PHASES_TABLE.value),
+    )
     assert response.status_code == 200
-    body = response.json()
-    assert body["finish_reason"] == "length"
-    assert body["validation"]["finish_reason_ok"] is False
-    assert any("truncated" in m.lower() for m in body["validation"]["issues"])
+    assert "confidence_pct" in call_log[0]["system_prompt"]
 
 
-def test_example_format_json_returns_200(client: TestClient, call_log: list[dict]) -> None:
-    payload = {
-        "transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks.",
-        "example_format": "json",
-        "num_examples": 2,
-    }
-    response = client.post("/api/v1/estimate", json=payload)
-    assert response.status_code == 200
-    body = response.json()
-    assert body["usage"]["input_tokens"] > 0
-    assert "Reference examples (JSON):" in call_log[0]["system_prompt"]
+def test_description_too_short_returns_422(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/estimate",
+        json=_valid_payload(description="short"),
+    )
+    assert response.status_code == 422
 
 
-def test_model_override_is_passed_to_provider(
+def test_provider_receives_separate_system_and_user_content(
     client: TestClient, call_log: list[dict]
 ) -> None:
-    payload = {
-        "transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks.",
-        "model": "gpt-4o",
-    }
-    response = client.post("/api/v1/estimate", json=payload)
+    """The fake LLM seam receives distinct system vs user bodies (no merge)."""
+    response = client.post("/api/v1/estimate", json=_valid_payload())
     assert response.status_code == 200
-    assert call_log[0]["model_override"] == "gpt-4o"
-
-
-def test_use_examples_false_omits_examples_block(
-    client: TestClient, call_log: list[dict]
-) -> None:
-    payload = {
-        "transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks.",
-        "use_examples": False,
-    }
-    response = client.post("/api/v1/estimate", json=payload)
-    assert response.status_code == 200
-    system_prompt = call_log[0]["system_prompt"]
-    assert "EXAMPLE 1" not in system_prompt
-    assert "Reference examples" not in system_prompt
+    sys_p = call_log[0]["system_prompt"]
+    usr = call_log[0]["user_message"]
+    assert "<role>" in sys_p
+    assert "<project_description>" in usr
+    assert "<project_description>" not in sys_p
+    assert "reservation mobile app" in usr
+    assert sys_p != usr

@@ -1,3 +1,10 @@
+"""Canonical estimation examples for cache-augmented prompts built in Python.
+
+``CANONICAL_EXAMPLES`` is the single source of truth. Formatting helpers feed
+:class:`~app.services.llm_service.build_system_prompt` and tests; the Jinja
+template path under ``app/prompts/`` uses its own static few-shot file.
+"""
+
 import json
 from dataclasses import dataclass
 
