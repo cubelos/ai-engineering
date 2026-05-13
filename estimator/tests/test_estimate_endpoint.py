@@ -100,6 +100,16 @@ def test_phases_table_format_propagates_to_system_prompt(
     assert "confidence_pct" in call_log[0]["system_prompt"]
 
 
+def test_estimate_passes_model_and_max_tokens_to_llm(client: TestClient, call_log: list[dict]) -> None:
+    response = client.post(
+        "/api/v1/estimate",
+        json=_valid_payload(model="custom-openai", max_tokens=1024),
+    )
+    assert response.status_code == 200
+    assert call_log[0]["model_override"] == "custom-openai"
+    assert call_log[0]["max_tokens"] == 1024
+
+
 def test_description_too_short_returns_422(client: TestClient) -> None:
     response = client.post(
         "/api/v1/estimate",

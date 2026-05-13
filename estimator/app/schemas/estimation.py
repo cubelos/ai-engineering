@@ -1,8 +1,9 @@
 """Pydantic models for estimation HTTP APIs and internal pipeline types.
 
 ``EstimationRequest`` / ``EstimationResponse`` are the public contract for
-``POST /api/v1/estimate``. Additional literals and models support the streaming
-route, canonical example formatting, and post-generation validation.
+``POST /api/v1/estimate`` and ``POST /api/v1/estimate/stream-form``. Additional
+literals and models support the transcription-only stream route, canonical
+example formatting, and post-generation validation.
 """
 
 from enum import Enum
@@ -82,7 +83,17 @@ class EstimationRequest(BaseModel):
     output_format: OutputFormat
     evaluate: bool = Field(
         default=True,
-        description="When true, run regex/parse validation on the model output.",
+        description="When true, run structural validation (blocking JSON or final SSE event).",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional model id override for this request.",
+    )
+    max_tokens: int = Field(
+        default=4000,
+        gt=0,
+        le=16000,
+        description="Maximum completion tokens for the provider call.",
     )
 
 

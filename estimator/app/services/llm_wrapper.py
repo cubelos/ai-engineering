@@ -202,8 +202,12 @@ class LLMWrapper:
         )
         cached = self.cache.get(cache_key)
         if cached:
-            log.info("stream_cache_hit", chars=len(cached.get("estimation", "")))
-            yield cached.get("estimation", "")
+            text = cached.get("estimation", "") or ""
+            log.info("stream_cache_hit", chars=len(text))
+            # Replay in slices so SSE clients see progress instead of one giant chunk.
+            step = 400
+            for i in range(0, len(text), step):
+                yield text[i : i + step]
             return
 
         messages = [

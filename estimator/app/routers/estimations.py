@@ -28,6 +28,51 @@ log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["estimations"])
 
+# Hint reverse proxies not to buffer SSE; ``curl`` still needs ``-N`` on the client.
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+async def _sse_token_stream(
+    wrapper: LLMWrapper,
+    *,
+    system_prompt: str,
+    user_message: str,
+    model_override: str | None,
+    max_tokens: int,
+) -> AsyncIterator[dict]:
+    """Yield SSE ``token`` events, then ``done``, or ``error`` on failure."""
+    loop = asyncio.get_running_loop()
+    chunks = wrapper.complete_stream(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        model_override=model_override,
+        max_tokens=max_tokens,
+    )
+
+    def _next_chunk() -> str | None:
+        try:
+            return next(chunks)
+        except StopIteration:
+            return None
+        except Exception as exc:  # noqa: BLE001 — surface as SSE error event
+            log.error("estimate_stream_failed", error=str(exc), error_type=type(exc).__name__)
+            raise
+
+    try:
+        while True:
+            chunk = await loop.run_in_executor(None, _next_chunk)
+            if chunk is None:
+                break
+            if chunk:
+                yield {"event": "token", "data": chunk}
+        yield {"event": "done", "data": "[DONE]"}
+    except Exception as exc:  # noqa: BLE001
+        yield {"event": "error", "data": str(exc)}
+
 
 @router.post("/estimate", response_model=EstimationResponse)
 async def create_estimation(request: EstimationRequest) -> EstimationResponse:
@@ -37,7 +82,10 @@ async def create_estimation(request: EstimationRequest) -> EstimationResponse:
     blocking LLM call, optionally validates markdown structure, and maps the
     provider payload into :class:`~app.schemas.estimation.EstimationResponse`.
     """
-    opts = GenerationOptions()
+    opts = GenerationOptions(
+        model=request.model,
+        max_tokens=request.max_tokens,
+    )
     system_prompt, user_prompt, prompt_version = render_estimation_prompt(request)
 
     try:
@@ -96,20 +144,48 @@ async def create_estimation_stream(
     system_prompt = build_system_prompt()
 
     async def event_generator() -> AsyncIterator[dict]:
-        loop = asyncio.get_running_loop()
-        chunks = wrapper.complete_stream(
+        async for ev in _sse_token_stream(
+            wrapper,
             system_prompt=system_prompt,
             user_message=request.transcription,
             model_override=request.model,
             max_tokens=request.max_tokens,
+        ):
+            yield ev
+
+    return EventSourceResponse(event_generator(), headers=_SSE_HEADERS)
+
+
+@router.post("/estimate/stream-form")
+async def create_estimation_stream_form(
+    request: EstimationRequest,
+    wrapper: LLMWrapper = Depends(get_llm_wrapper),
+) -> EventSourceResponse:
+    """Stream tokens for the same typed body as ``POST /api/v1/estimate`` (Jinja prompts).
+
+    After the model finishes, if ``evaluate`` is true, emits one ``validation``
+    event whose ``data`` is JSON matching :class:`~app.schemas.estimation.StructureCheck`,
+    then ``done``. The streaming wrapper records ``finish_reason`` as ``stop`` on
+    success; that value is used for the structural check.
+    """
+    system_prompt, user_prompt, _prompt_version = render_estimation_prompt(request)
+
+    async def event_generator() -> AsyncIterator[dict]:
+        loop = asyncio.get_running_loop()
+        chunks = wrapper.complete_stream(
+            system_prompt=system_prompt,
+            user_message=user_prompt,
+            model_override=request.model,
+            max_tokens=request.max_tokens,
         )
+        parts: list[str] = []
 
         def _next_chunk() -> str | None:
             try:
                 return next(chunks)
             except StopIteration:
                 return None
-            except Exception as exc:  # noqa: BLE001 — surface as SSE error event
+            except Exception as exc:  # noqa: BLE001
                 log.error("estimate_stream_failed", error=str(exc), error_type=type(exc).__name__)
                 raise
 
@@ -119,9 +195,13 @@ async def create_estimation_stream(
                 if chunk is None:
                     break
                 if chunk:
+                    parts.append(chunk)
                     yield {"event": "token", "data": chunk}
+            if request.evaluate:
+                check = evaluate_estimation_structure("".join(parts), "stop")
+                yield {"event": "validation", "data": check.model_dump_json()}
             yield {"event": "done", "data": "[DONE]"}
         except Exception as exc:  # noqa: BLE001
             yield {"event": "error", "data": str(exc)}
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), headers=_SSE_HEADERS)

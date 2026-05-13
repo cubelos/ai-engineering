@@ -143,7 +143,7 @@ def test_complete_stream_yields_chunks_and_caches(wrapper: LLMWrapper) -> None:
         )
     assert "".join(emitted) == "Hello world"
 
-    # Now the same request hits the cache and replays the full text as one chunk.
+    # Same request hits the cache; replay is sliced (~400 chars) for progressive SSE UX.
     with patch.object(wrapper.router, "completion") as router_call:
         replayed = list(
             wrapper.complete_stream(

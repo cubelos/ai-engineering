@@ -31,7 +31,7 @@ uv run uvicorn app.main:app --reload
 
 ## Uso de la API principal
 
-`POST /api/v1/estimate` acepta un JSON con el contrato `EstimationRequest` (validación Pydantic). La respuesta incluye el texto de la estimación (`text`), la versión de plantillas usada (`prompt_version`), uso de tokens, coste estimado, acierto de caché y, si se pide, resultado de la validación estructural.
+`POST /api/v1/estimate` acepta un JSON con el contrato `EstimationRequest` (validación Pydantic): `description`, `project_type`, `detail_level`, `output_format`, `evaluate`, y opcionales `model` y `max_tokens`. La respuesta incluye el texto de la estimación (`text`), la versión de plantillas usada (`prompt_version`), uso de tokens, coste estimado, acierto de caché y, si se pide, resultado de la validación estructural.
 
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/estimate \
@@ -50,7 +50,7 @@ curl -s -X POST http://localhost:8000/api/v1/estimate \
 - **Plantillas Jinja2** versionadas (`app/prompts/estimation/v1/`) y renderizado centralizado en `app/prompts/loader.py`; el modelo recibe mensajes **system** y **user** separados.
 - **LiteLLM** con modelo principal y **fallback**, tiempo de espera y reintentos configurables.
 - **Caché exact-match** en Redis (clave derivada del system prompt, user message y parámetros de generación).
-- **Streaming SSE**: `POST /api/v1/estimate/stream` para transcripciones largas con emisión token a token.
+- **Streaming SSE**: `POST /api/v1/estimate/stream` (transcripción larga, token a token) y `POST /api/v1/estimate/stream-form` (mismo cuerpo que el estimate JSON, prompts Jinja; si `evaluate` es true, un evento `validation` con el JSON de la comprobación estructural antes de `done`).
 - **Ejemplos canónicos** en Python (`app/context/examples.py`) para el prompt ensamblado en código usado por el flujo de streaming.
 - **Validación ligera** del markdown devuelto (tablas, totales, secciones) cuando `evaluate` es verdadero.
 
@@ -63,7 +63,7 @@ estimator/
 │   ├── config.py            # Variables de entorno (Pydantic Settings)
 │   ├── dependencies.py      # Caché y wrapper LLM (singletons)
 │   ├── routers/
-│   │   └── estimations.py   # POST /api/v1/estimate, POST .../estimate/stream
+│   │   └── estimations.py   # POST /api/v1/estimate, /estimate/stream, /estimate/stream-form
 │   ├── services/
 │   │   ├── llm_service.py   # Orquestación y dispatch al wrapper
 │   │   ├── llm_wrapper.py   # LiteLLM, caché, costes
@@ -77,7 +77,7 @@ estimator/
 │   ├── context/
 │   │   └── examples.py        # Ejemplos CAG para build_system_prompt
 │   └── fixtures/              # Transcripciones de ejemplo
-├── streamlit_app.py         # Formulario → POST /api/v1/estimate
+├── streamlit_app.py         # Formulario → JSON /api/v1/estimate u opción SSE stream-form
 ├── tests/
 │   ├── prompts/
 │   │   └── test_estimation_v1.py
@@ -98,6 +98,22 @@ curl -N -X POST http://localhost:8000/api/v1/estimate/stream \
   -H 'Content-Type: application/json' \
   -d '{"transcription": "We need a small CRM with auth, contacts and roles. MVP six weeks."}'
 ```
+
+Mismo contrato de formulario que `POST /api/v1/estimate`, pero en SSE (`token`, opcionalmente `validation` si `evaluate` es true, luego `done`):
+
+```bash
+curl -N -X POST http://localhost:8000/api/v1/estimate/stream-form \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "description": "We need a small CRM with auth, contacts and roles for MVP in about six weeks.",
+    "project_type": "web_saas",
+    "detail_level": "summary",
+    "output_format": "line_items",
+    "evaluate": true
+  }'
+```
+
+**`curl -N`** desactiva el buffer del cliente; sin eso a veces no ves tokens hasta el final. En **acierto de caché** el stream reenvía el texto en segmentos (~400 caracteres) para que el SSE sea visible; la primera vez, el ritmo depende de cómo el proveedor emita los chunks.
 
 Demo estática: [http://localhost:8000/static/sse_demo.html](http://localhost:8000/static/sse_demo.html) (si existe el directorio `app/static`).
 
@@ -121,7 +137,7 @@ Si ejecutas **solo uvicorn en el host**, usa `REDIS_URL=redis://localhost:6379` 
 
 ## Cliente Streamlit
 
-Interfaz de formulario que envía `EstimationRequest` al endpoint JSON (no sustituye al streaming para demos largas).
+Interfaz de formulario que envía `EstimationRequest` al endpoint JSON o, si marcas la opción de streaming, a `POST /api/v1/estimate/stream-form` (mismos campos; muestra la métrica de validación cuando llega el evento `validation`).
 
 ```bash
 cd estimator

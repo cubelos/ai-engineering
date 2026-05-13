@@ -6,6 +6,7 @@ backend base URL (defaults to ``http://localhost:8000``).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ load_dotenv()
 API_BASE_URL = os.getenv("ESTIMATOR_API_BASE_URL", "http://localhost:8000")
 ESTIMATE_ENDPOINT = f"{API_BASE_URL.rstrip('/')}/api/v1/estimate"
 STREAM_ENDPOINT = f"{API_BASE_URL.rstrip('/')}/api/v1/estimate/stream"
+STREAM_FORM_ENDPOINT = f"{API_BASE_URL.rstrip('/')}/api/v1/estimate/stream-form"
 
 st.set_page_config(page_title="Software Estimator", page_icon="📊")
 st.title("Software Estimator")
@@ -93,6 +95,13 @@ with st.form("estimation_form"):
         value=True,
         help="Runs structural checks (sections, table sums, finish reason) on the returned markdown.",
     )
+    use_stream = st.checkbox(
+        "Stream tokens (SSE, same form as JSON endpoint)",
+        value=False,
+        help="POST /api/v1/estimate/stream-form. The UI refreshes on each token. "
+        "If Redis returns a cached estimate, the API replays it in ~400-char slices. "
+        "Use curl -N when testing in a terminal.",
+    )
     submitted = st.form_submit_button("Generate estimation")
 
 if submitted:
@@ -107,23 +116,74 @@ if submitted:
     except Exception as exc:  # noqa: BLE001 — Pydantic user-facing validation
         st.error(f"Invalid input: {exc}")
     else:
-        with st.spinner("Calling the estimator service…"):
-            try:
-                r = httpx.post(
-                    ESTIMATE_ENDPOINT,
-                    json=req.model_dump(mode="json"),
+        payload = req.model_dump(mode="json")
+        try:
+            if use_stream:
+                # Update the placeholder on every token; a single ``st.markdown`` at
+                # the end looks like "everything at once" because Streamlit only
+                # paints after the blocking loop finishes.
+                text_acc: list[str] = []
+                validation_obj: dict | None = None
+                event_name = "message"
+                data_lines: list[str] = []
+                stream_md = st.empty()
+                st.caption("Streaming tokens from the API…")
+                with httpx.stream(
+                    "POST",
+                    STREAM_FORM_ENDPOINT,
+                    json=payload,
                     timeout=httpx.Timeout(120.0, connect=10.0),
-                )
-                r.raise_for_status()
-            except httpx.HTTPError as exc:
-                st.error(f"Request failed (`{ESTIMATE_ENDPOINT}`): {exc}")
+                ) as r:
+                    r.raise_for_status()
+                    for raw in r.iter_lines():
+                        line = raw.decode() if isinstance(raw, bytes) else (raw or "")
+                        if line == "":
+                            if data_lines:
+                                joined = "\n".join(data_lines)
+                                if event_name == "token":
+                                    text_acc.append(joined)
+                                    stream_md.markdown("".join(text_acc))
+                                elif event_name == "validation":
+                                    validation_obj = json.loads(joined)
+                                elif event_name == "error":
+                                    raise RuntimeError(joined)
+                                data_lines = []
+                            continue
+                        if line.startswith("event:"):
+                            event_name = line[len("event:") :].strip()
+                        elif line.startswith("data:"):
+                            data_lines.append(line[len("data:") :].lstrip())
+                    if data_lines:
+                        joined = "\n".join(data_lines)
+                        if event_name == "token":
+                            text_acc.append(joined)
+                            stream_md.markdown("".join(text_acc))
+                        elif event_name == "validation":
+                            validation_obj = json.loads(joined)
+                        elif event_name == "error":
+                            raise RuntimeError(joined)
+                st.success("Stream finished (`stream-form`).")
+                if validation_obj is not None:
+                    st.metric("Validation score", f"{float(validation_obj.get('score', 0)):.2f}")
             else:
-                body = r.json()
-                st.success(f"Prompt version: `{body.get('prompt_version', '?')}`")
-                if body.get("validation"):
-                    v = body["validation"]
-                    st.metric("Validation score", f"{v.get('score', 0):.2f}")
-                st.markdown(body.get("text") or "")
+                with st.spinner("Calling the estimator service…"):
+                    r = httpx.post(
+                        ESTIMATE_ENDPOINT,
+                        json=payload,
+                        timeout=httpx.Timeout(120.0, connect=10.0),
+                    )
+                    r.raise_for_status()
+                    body = r.json()
+                    st.success(f"Prompt version: `{body.get('prompt_version', '?')}`")
+                    if body.get("validation"):
+                        v = body["validation"]
+                        st.metric("Validation score", f"{v.get('score', 0):.2f}")
+                    st.markdown(body.get("text") or "")
+        except httpx.HTTPError as exc:
+            ep = STREAM_FORM_ENDPOINT if use_stream else ESTIMATE_ENDPOINT
+            st.error(f"Request failed (`{ep}`): {exc}")
+        except (RuntimeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            st.error(f"Stream parse error: {exc}")
 
 with st.sidebar:
     st.header("Endpoints")
@@ -131,6 +191,8 @@ with st.sidebar:
     st.code(ESTIMATE_ENDPOINT, language="text")
     st.markdown("**Streaming (transcription demo)**")
     st.code(STREAM_ENDPOINT, language="text")
+    st.markdown("**Streaming (typed form, Jinja)**")
+    st.code(STREAM_FORM_ENDPOINT, language="text")
     primary = os.getenv("PRIMARY_MODEL", "gpt-4o-mini")
     fallback = os.getenv("FALLBACK_MODEL", "claude-haiku-4-5-20251001")
     st.markdown(f"**Primary model:** `{primary}`")
