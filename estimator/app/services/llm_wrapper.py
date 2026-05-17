@@ -3,10 +3,11 @@ and structured logging to every LLM call in the estimator.
 
 Design notes
 ------------
-- The wrapper exposes two primitives:
+- The wrapper exposes three public primitives:
   - ``complete()``: legacy free-text answer (kept for tests that depend on it).
-  - ``complete_structured()``: returns a validated Pydantic model via Instructor,
-    re-prompting on validator errors up to ``max_retries`` times.
+  - ``complete_structured()``: single-turn structured output (system + user strings).
+  - ``complete_structured_messages()``: multi-turn or multimodal; full ``messages`` array.
+- All structured paths use Instructor and re-prompt on Pydantic validator errors.
 - The Router is configured with two deployments under the same ``model_name``
   ("estimator") so LiteLLM can switch from primary to fallback transparently.
   When the caller overrides the model per-request we bypass the Router and call
@@ -43,6 +44,7 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Approximate USD cost from ``MODEL_COSTS`` and token counts."""
     base = _normalise_model_name(model)
     costs = MODEL_COSTS.get(base) or MODEL_COSTS.get(model) or {"input": 0.0, "output": 0.0}
     return round((tokens_in * costs["input"] + tokens_out * costs["output"]) / 1_000_000, 6)
@@ -54,6 +56,7 @@ def _normalise_model_name(model: str) -> str:
 
 
 def _provider_from_model(model: str) -> str:
+    """Map a model id to ``openai``, ``anthropic``, or ``unknown``."""
     name = _normalise_model_name(model).lower()
     if name.startswith("claude"):
         return "anthropic"
@@ -191,21 +194,35 @@ class LLMWrapper:
         max_tokens: int = 4000,
         max_retries: int = 6,
     ) -> tuple[T, dict[str, Any]]:
-        """Run the LLM with Instructor and return ``(model_instance, meta)``.
-
-        ``meta`` includes ``model``, ``provider`` and ``latency_ms``. Instructor
-        re-prompts the LLM up to ``max_retries`` times when a Pydantic validator
-        raises, feeding the ``ValueError`` message back to the model.
-
-        Streaming bypasses are not relevant here — the entire model is built
-        atomically by Instructor before this function returns.
-        """
-        target_model = model_override or self.primary_model
+        """Structured single-turn call: builds ``[system, user]`` and delegates to ``complete_structured_messages``."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
+        return self.complete_structured_messages(
+            messages=messages,
+            response_model=response_model,
+            model_override=model_override,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+        )
 
+    def complete_structured_messages(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        response_model: type[T],
+        model_override: str | None = None,
+        max_tokens: int = 4000,
+        max_retries: int = 6,
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[T, dict[str, Any]]:
+        """Structured call with a full ``messages`` list (sessions, multimodal PDFs).
+
+        Returns ``(validated_model, meta)`` where ``meta`` has model, provider, latency_ms.
+        Pass ``extra_kwargs`` for provider-specific headers (e.g. Anthropic Files API beta).
+        """
+        target_model = model_override or self.primary_model
         api_key = (
             self.anthropic_api_key
             if _provider_from_model(target_model) == "anthropic"
@@ -216,18 +233,23 @@ class LLMWrapper:
             "llm_structured_call_started",
             model=target_model,
             response_model=response_model.__name__,
+            message_count=len(messages),
         )
         t0 = time.perf_counter()
+        call_kwargs: dict[str, Any] = {
+            "model": target_model,
+            "api_key": api_key,
+            "timeout": self.timeout,
+            "messages": messages,
+            "response_model": response_model,
+            "max_tokens": max_tokens,
+            "max_retries": max_retries,
+        }
+        if extra_kwargs:
+            call_kwargs.update(extra_kwargs)
+
         try:
-            result = self._instructor.chat.completions.create(
-                model=target_model,
-                api_key=api_key,
-                timeout=self.timeout,
-                messages=messages,
-                response_model=response_model,
-                max_tokens=max_tokens,
-                max_retries=max_retries,
-            )
+            result = self._instructor.chat.completions.create(**call_kwargs)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             log.error(

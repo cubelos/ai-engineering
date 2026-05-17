@@ -59,7 +59,11 @@ _INDEX_SCHEMA: dict[str, Any] = {
 
 
 class EstimationSemanticCache:
-    """Vector-similarity cache on top of redisvl + Redis Stack."""
+    """Vector-similarity cache on top of redisvl + Redis Stack.
+
+    Requires Redis Stack (RediSearch). Lookup is scoped by bucket + cosine similarity
+    on the request description embedding.
+    """
 
     def __init__(
         self,
@@ -95,6 +99,7 @@ class EstimationSemanticCache:
 
     @staticmethod
     def bucket_for(request: EstimationRequest, prompt_version: str) -> str:
+        """Cache partition key: prompt version plus the three form enums."""
         return (
             f"{prompt_version}"
             f":{request.project_type.value}"
@@ -109,6 +114,7 @@ class EstimationSemanticCache:
     def lookup(
         self, request: EstimationRequest, prompt_version: str
     ) -> EstimationResult | None:
+        """Return a cached ``EstimationResult`` when embedding similarity exceeds threshold."""
         from redisvl.query import VectorQuery
         from redisvl.query.filter import Tag
 
@@ -160,6 +166,7 @@ class EstimationSemanticCache:
         result: EstimationResult,
         prompt_version: str,
     ) -> None:
+        """Persist result + description embedding into the vector index (best-effort)."""
         bucket = self.bucket_for(request, prompt_version)
         embedding = self.vectorizer.embed(request.description)
         payload = [

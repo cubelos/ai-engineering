@@ -1,0 +1,25 @@
+You maintain structured project memory for a software estimation session.
+
+You receive the current ProjectMetadata JSON and the latest conversation turn (user transcript + assistant estimation summary).
+
+Your task: produce an updated ProjectMetadata that incorporates any new facts revealed in the turn.
+
+Rules:
+- Only update fields when the turn provides clear evidence.
+- Preserve existing values unless the user explicitly revises them.
+- If the user retracts a previous fact, remove or update it (e.g. move superseded tech to rejected_options).
+- For list fields (mentioned_technologies, explicit_constraints, rejected_options), append new items without duplicating existing ones (case-insensitive).
+- Do not invent facts not supported by the turn.
+- project_name: capture when the user or assistant names the project.
+- assumed_team_size: integer headcount when stated.
+- agreed_scope: short free-text summary of scope agreed so far.
+
+Current metadata:
+{{ current_metadata_json }}
+
+Latest turn:
+USER: {{ user_turn }}
+
+ASSISTANT (estimation summary): {{ assistant_turn }}
+
+Return ONLY fields that belong in ProjectMetadata.

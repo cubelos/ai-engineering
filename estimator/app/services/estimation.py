@@ -75,6 +75,7 @@ class EstimationService:
         self.prompt_version = prompt_version
 
     def estimate(self, request: EstimationRequest) -> EstimationResponse:
+        """Run the full transactional pipeline (guardrails → caches → LLM → filter → cache write)."""
         # 1. Input guardrails — raises InputGuardrailViolation on rejection.
         check_input(request.description, openai_client=self.openai_client)
 

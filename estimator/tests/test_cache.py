@@ -1,3 +1,5 @@
+"""Unit tests for the Redis exact-match cache (EstimationCache)."""
+
 import fakeredis
 import pytest
 
@@ -10,6 +12,7 @@ def cache() -> EstimationCache:
 
 
 def test_make_key_is_deterministic() -> None:
+    """The same prompt inputs always produce the same cache key."""
     args = dict(
         system_prompt="hello",
         user_message="world",
@@ -21,6 +24,7 @@ def test_make_key_is_deterministic() -> None:
 
 
 def test_make_key_changes_when_inputs_change() -> None:
+    """Any change to prompt, model, or generation params yields a different key."""
     base = dict(
         system_prompt="hello",
         user_message="world",
@@ -36,6 +40,7 @@ def test_make_key_changes_when_inputs_change() -> None:
 
 
 def test_set_then_get_roundtrips_payload(cache: EstimationCache) -> None:
+    """A stored payload is returned verbatim on cache hit."""
     payload = {"estimation": "...", "model": "gpt-4o-mini", "cost_usd": 0.001}
     key = EstimationCache.make_key(
         system_prompt="s", user_message="u", model="m", max_tokens=10, thinking_budget=None
@@ -45,6 +50,7 @@ def test_set_then_get_roundtrips_payload(cache: EstimationCache) -> None:
 
 
 def test_get_returns_none_on_miss(cache: EstimationCache) -> None:
+    """An unknown key returns None instead of raising."""
     key = EstimationCache.make_key(
         system_prompt="s", user_message="u", model="m", max_tokens=10, thinking_budget=None
     )
@@ -52,10 +58,10 @@ def test_get_returns_none_on_miss(cache: EstimationCache) -> None:
 
 
 def test_set_applies_ttl(cache: EstimationCache) -> None:
+    """Redis TTL is set on write so entries expire automatically."""
     key = EstimationCache.make_key(
         system_prompt="s", user_message="u", model="m", max_tokens=10, thinking_budget=None
     )
     cache.set(key, {"x": 1})
     ttl = cache.redis.ttl(key)
-    # Within 1 second of the configured TTL.
     assert 0 < ttl <= 60

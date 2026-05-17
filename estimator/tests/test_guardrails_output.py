@@ -31,12 +31,14 @@ def _build(*, confidence_pct: int, summary: str) -> EstimationResult:
 
 
 def test_high_confidence_passes_through_untouched() -> None:
+    """High-confidence results are returned unchanged by enforce_scope_response."""
     original = _build(confidence_pct=80, summary="Solid mid-size SaaS build.")
     out = enforce_scope_response(original)
     assert out is original  # exact same instance, no rewrite
 
 
 def test_low_confidence_with_correct_prefix_passes_through() -> None:
+    """Low confidence with the correct prefix is not rewritten."""
     original = _build(
         confidence_pct=15,
         summary=f"{OUT_OF_SCOPE_PREFIX} the description is too vague.",
@@ -46,6 +48,7 @@ def test_low_confidence_with_correct_prefix_passes_through() -> None:
 
 
 def test_low_confidence_without_prefix_gets_rewritten() -> None:
+    """Low confidence without 'Out of scope:' gets a normalised placeholder response."""
     original = _build(
         confidence_pct=10,
         summary="A standard SaaS project around 30k.",
@@ -64,7 +67,7 @@ def test_low_confidence_without_prefix_gets_rewritten() -> None:
 
 
 def test_filter_never_raises_even_with_pathological_input() -> None:
-    """No matter the field combination, the filter returns a valid model."""
+    """The output filter always returns a valid EstimationResult, never raises."""
     original = _build(confidence_pct=0, summary="x" * 1000)
     out = enforce_scope_response(original)
     # Schema would have refused validation; we accept it via model_construct

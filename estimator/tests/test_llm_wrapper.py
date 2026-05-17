@@ -1,3 +1,5 @@
+"""Unit tests for LLMWrapper (LiteLLM router, cache, cost tracking)."""
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -41,12 +43,14 @@ def wrapper() -> LLMWrapper:
 
 
 def test_estimate_cost_uses_pricing_table() -> None:
+    """Token cost is computed from the built-in MODEL_COSTS pricing table."""
     cost = _estimate_cost("gpt-4o-mini", 1_000_000, 1_000_000)
     # 1M input * 0.15 + 1M output * 0.60 = 0.75 USD
     assert cost == pytest.approx(0.75)
 
 
 def test_complete_returns_normalised_dict_and_caches(wrapper: LLMWrapper) -> None:
+    """complete() normalises the LiteLLM response and serves identical prompts from cache."""
     fake = _fake_completion(model="gpt-4o-mini", content="hello world")
     with patch.object(wrapper.router, "completion", return_value=fake) as mocked:
         result = wrapper.complete(
@@ -81,6 +85,7 @@ def test_complete_returns_normalised_dict_and_caches(wrapper: LLMWrapper) -> Non
 
 
 def test_complete_with_model_override_bypasses_router(wrapper: LLMWrapper) -> None:
+    """model_override calls litellm.completion directly instead of the fallback Router."""
     fake = _fake_completion(model="gpt-4o", content="overridden")
     with patch("app.services.llm_wrapper.litellm.completion", return_value=fake) as direct, \
         patch.object(wrapper.router, "completion") as router_call:
@@ -98,6 +103,7 @@ def test_complete_with_model_override_bypasses_router(wrapper: LLMWrapper) -> No
 
 
 def test_thinking_budget_passed_for_anthropic_fallback(wrapper: LLMWrapper) -> None:
+    """thinking_budget is ignored when the active model is OpenAI (primary path)."""
     fake = _fake_completion(model="claude-haiku-4-5-20251001", content="ok")
     with patch.object(wrapper.router, "completion", return_value=fake) as mocked:
         wrapper.complete(
@@ -112,6 +118,7 @@ def test_thinking_budget_passed_for_anthropic_fallback(wrapper: LLMWrapper) -> N
 
 
 def test_thinking_budget_pads_max_tokens_when_anthropic_override(wrapper: LLMWrapper) -> None:
+    """Anthropic thinking mode bumps max_tokens to budget + 1024 when override is Claude."""
     fake = _fake_completion(model="claude-haiku-4-5-20251001", content="ok")
     with patch("app.services.llm_wrapper.litellm.completion", return_value=fake) as direct:
         wrapper.complete(

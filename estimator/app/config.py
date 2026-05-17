@@ -1,3 +1,5 @@
+"""Application settings loaded from environment variables and ``.env``."""
+
 from functools import lru_cache
 from typing import Literal
 
@@ -36,6 +38,9 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_LOG_ONLY: bool = False
 
     ESTIMATOR_API_BASE_URL: str = "http://localhost:8000"
+
+    # --- Session 5 fields (conversational memory) ---
+    MAX_CONVERSATION_TURNS: int = 6
 
     @model_validator(mode="after")
     def validate_at_least_one_api_key(self) -> "Settings":

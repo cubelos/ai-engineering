@@ -25,7 +25,10 @@ Reason = Literal["moderation", "prompt_injection", "pii"]
 
 
 class InputGuardrailViolation(Exception):
-    """Raised by ``check_input`` when one of the input layers rejects the description."""
+    """Raised by ``check_input`` when moderation, injection, or PII checks fail.
+
+    ``reason`` is one of ``moderation``, ``prompt_injection``, or ``pii`` for HTTP mapping.
+    """
 
     def __init__(self, message: str, *, reason: Reason) -> None:
         super().__init__(message)

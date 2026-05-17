@@ -32,6 +32,7 @@ def _make_request(**overrides) -> EstimationRequest:
 
 
 def test_user_prompt_wraps_description_in_project_description_block() -> None:
+    """The user template places the description inside <project_description> tags."""
     request = _make_request(description="UNIQUE-MARKER-12345 build a tiny scheduling app.")
     _system, user = render_estimation_prompt(request)
     assert "<project_description>" in user
@@ -43,6 +44,7 @@ def test_user_prompt_wraps_description_in_project_description_block() -> None:
 
 
 def test_phases_table_keyword_appears_only_when_format_requested() -> None:
+    """The phases_table layout hint appears in the system prompt only for that output_format."""
     table_request = _make_request(output_format=OutputFormat.PHASES_TABLE)
     narrative_request = _make_request(output_format=OutputFormat.NARRATIVE)
 
@@ -54,6 +56,7 @@ def test_phases_table_keyword_appears_only_when_format_requested() -> None:
 
 
 def test_detailed_includes_assumptions_per_phase_summary_does_not() -> None:
+    """detail_level=detailed adds per-phase assumptions; summary level does not."""
     detailed_request = _make_request(detail_level=DetailLevel.DETAILED)
     summary_request = _make_request(detail_level=DetailLevel.SUMMARY)
 
@@ -65,6 +68,7 @@ def test_detailed_includes_assumptions_per_phase_summary_does_not() -> None:
 
 
 def test_examples_block_is_included_in_system_prompt() -> None:
+    """Few-shot examples from examples.j2 are included in every system prompt."""
     request = _make_request()
     system, _ = render_estimation_prompt(request)
     assert "<examples>" in system
@@ -72,9 +76,7 @@ def test_examples_block_is_included_in_system_prompt() -> None:
 
 
 def test_strict_undefined_raises_on_missing_variable() -> None:
-    """A separate Jinja2 template with the same StrictUndefined config must error
-    early when a variable is missing — guarantees that typos in templates are
-    surfaced at render time, not silently rendered as empty strings."""
+    """StrictUndefined raises at render time when a template references an unknown variable."""
     env = Environment(undefined=StrictUndefined)
     template = env.from_string("Hello {{ unknown_variable }}")
     with pytest.raises(UndefinedError):
@@ -82,6 +84,7 @@ def test_strict_undefined_raises_on_missing_variable() -> None:
 
 
 def test_unknown_version_raises() -> None:
+    """Requesting a non-existent prompt version (e.g. v999) fails at render time."""
     request = _make_request()
     with pytest.raises(Exception):
         render_estimation_prompt(request, version="v999")

@@ -1,4 +1,7 @@
-"""FastAPI dependency factories for shared singletons."""
+"""FastAPI dependency factories for process-wide singletons (cache, LLM, services).
+
+All ``get_*`` functions are ``@lru_cache``d: restart uvicorn after changing ``.env``.
+"""
 
 from __future__ import annotations
 
@@ -13,18 +16,22 @@ from app.config import get_settings
 from app.services.cache import EstimationCache
 from app.services.estimation import EstimationService
 from app.services.llm_wrapper import LLMWrapper
+from app.services.session_estimation import SessionEstimationService
+from app.services.sessions import SessionStore
 
 log = structlog.get_logger()
 
 
 @lru_cache
 def get_cache() -> EstimationCache:
+    """Redis-backed exact-match cache for LLM responses."""
     settings = get_settings()
     return EstimationCache.from_url(settings.REDIS_URL, ttl=settings.CACHE_TTL)
 
 
 @lru_cache
 def get_llm_wrapper() -> LLMWrapper:
+    """LiteLLM + Instructor wrapper shared by transactional and session pipelines."""
     settings = get_settings()
     return LLMWrapper(
         openai_api_key=settings.OPENAI_API_KEY,
@@ -86,9 +93,28 @@ def get_semantic_cache() -> EstimationSemanticCache | None:
 
 @lru_cache
 def get_estimation_service() -> EstimationService:
+    """Transactional pipeline for ``POST /api/v1/estimate`` (guardrails + caches + LLM)."""
     return EstimationService(
         llm_wrapper=get_llm_wrapper(),
         exact_cache=get_cache(),
         semantic_cache=get_semantic_cache(),
         openai_client=get_openai_client(),
+    )
+
+
+@lru_cache
+def get_session_store() -> SessionStore:
+    """In-memory registry of conversational sessions (``MAX_CONVERSATION_TURNS`` from settings)."""
+    settings = get_settings()
+    return SessionStore(max_turns=settings.MAX_CONVERSATION_TURNS)
+
+
+@lru_cache
+def get_session_estimation_service() -> SessionEstimationService:
+    """Multi-turn pipeline for ``POST /api/v1/sessions/{id}/estimate`` (no Redis cache)."""
+    return SessionEstimationService(
+        llm_wrapper=get_llm_wrapper(),
+        session_store=get_session_store(),
+        openai_client=get_openai_client(),
+        prompt_version="v1",
     )

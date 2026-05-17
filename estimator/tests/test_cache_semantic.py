@@ -73,6 +73,7 @@ class _NoopPatcher:
 
 
 def test_bucket_includes_all_form_options() -> None:
+    """Semantic cache bucket key encodes prompt_version and all three form enums."""
     from app.cache.semantic import EstimationSemanticCache
 
     request = _valid_request()
@@ -81,6 +82,7 @@ def test_bucket_includes_all_form_options() -> None:
 
 
 def test_bucket_changes_when_any_option_changes() -> None:
+    """Different output_format values land in separate semantic cache buckets."""
     from app.cache.semantic import EstimationSemanticCache
 
     base = _valid_request()
@@ -93,6 +95,7 @@ def test_bucket_changes_when_any_option_changes() -> None:
 
 
 def test_bucket_changes_when_prompt_version_changes() -> None:
+    """v1 and v2 prompts never share the same semantic cache bucket."""
     from app.cache.semantic import EstimationSemanticCache
 
     request = _valid_request()
@@ -105,11 +108,13 @@ def test_bucket_changes_when_prompt_version_changes() -> None:
 
 
 def test_lookup_returns_none_when_index_is_empty() -> None:
+    """lookup returns None when the vector index has no candidates."""
     cache, _, _ = _build_cache(hits=[])
     assert cache.lookup(_valid_request(), prompt_version="v1") is None
 
 
 def test_lookup_returns_none_when_similarity_below_threshold() -> None:
+    """A near-miss embedding below SEMANTIC_CACHE_THRESHOLD does not count as a hit."""
     # Below threshold: cosine distance 0.5 → similarity 0.5 < 0.92
     cache, _, _ = _build_cache(
         threshold=0.92,
@@ -119,6 +124,7 @@ def test_lookup_returns_none_when_similarity_below_threshold() -> None:
 
 
 def test_lookup_returns_result_when_similarity_above_threshold() -> None:
+    """A close embedding above threshold deserialises and returns EstimationResult."""
     # Above threshold: distance 0.05 → similarity 0.95
     cache, _, _ = _build_cache(
         threshold=0.92,
@@ -130,6 +136,7 @@ def test_lookup_returns_result_when_similarity_above_threshold() -> None:
 
 
 def test_lookup_log_only_never_serves_even_on_hit() -> None:
+    """SEMANTIC_CACHE_LOG_ONLY logs would-be hits but always returns None."""
     cache, _, _ = _build_cache(
         threshold=0.92,
         log_only=True,
@@ -142,6 +149,7 @@ def test_lookup_log_only_never_serves_even_on_hit() -> None:
 
 
 def test_store_writes_to_index_with_ttl() -> None:
+    """store persists result_json and bucket into the vector index with TTL."""
     cache, fake_index, _ = _build_cache()
     cache.store(_valid_request(), _canned_result(), prompt_version="v1")
     assert fake_index.load.called
@@ -153,6 +161,7 @@ def test_store_writes_to_index_with_ttl() -> None:
 
 
 def test_store_swallows_index_errors() -> None:
+    """Index write failures are logged but do not break the estimation pipeline."""
     cache, fake_index, _ = _build_cache()
     fake_index.load.side_effect = RuntimeError("redis unreachable")
     # Should not raise — the cache write is best-effort.

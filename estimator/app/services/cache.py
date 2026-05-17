@@ -28,6 +28,7 @@ class EstimationCache:
 
     @classmethod
     def from_url(cls, url: str, ttl: int = 86400) -> "EstimationCache":
+        """Construct a cache client from a Redis URL."""
         return cls(redis.from_url(url, decode_responses=True), ttl=ttl)
 
     @staticmethod
@@ -39,6 +40,7 @@ class EstimationCache:
         max_tokens: int,
         thinking_budget: int | None,
     ) -> str:
+        """SHA-256 key over prompt text and generation parameters."""
         payload = json.dumps(
             {
                 "system_prompt": system_prompt,
@@ -53,6 +55,7 @@ class EstimationCache:
         return f"estimation:{digest}"
 
     def get(self, key: str) -> dict[str, Any] | None:
+        """Return cached JSON dict or ``None`` on miss or Redis error."""
         try:
             cached = self.redis.get(key)
         except redis.RedisError as exc:
@@ -65,6 +68,7 @@ class EstimationCache:
         return None
 
     def set(self, key: str, response: dict[str, Any]) -> None:
+        """Store JSON-serialisable payload with configured TTL."""
         try:
             self.redis.setex(key, self.ttl, json.dumps(response))
             log.info("cache_stored", key_prefix=key[:24], ttl=self.ttl)

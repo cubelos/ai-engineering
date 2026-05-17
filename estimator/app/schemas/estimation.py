@@ -4,12 +4,10 @@ Session 4 contract: typed form-style request maps to a typed, validated
 ``EstimationResult`` (structured output via Instructor + Pydantic). Two model
 validators enforce business rules that the LLM cannot break:
 
-1. The cost of all phases must sum to ``total_cost_eur``.
+1. ``total_cost_eur`` and ``total_duration_weeks`` are aligned to phase sums
+   when the model's arithmetic is off (avoids endless Instructor retries).
 2. Low-confidence answers (< 30%) must declare it explicitly by starting the
-   summary with ``"Out of scope:"``.
-
-When the LLM violates a validator, Instructor re-prompts the model with the
-``ValueError`` message until it agrees (up to ``max_retries`` attempts).
+   summary with ``"Out of scope:"`` — Instructor re-prompts on that violation.
 """
 
 from enum import Enum
@@ -18,6 +16,8 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectType(str, Enum):
+    """Coarse project category sent by the cliente form."""
+
     MOBILE_APP = "mobile_app"
     WEB_SAAS = "web_saas"
     INTERNAL_TOOL = "internal_tool"
@@ -25,12 +25,16 @@ class ProjectType(str, Enum):
 
 
 class DetailLevel(str, Enum):
+    """How much breakdown the prompt asks the LLM to produce."""
+
     SUMMARY = "summary"
     MEDIUM = "medium"
     DETAILED = "detailed"
 
 
 class OutputFormat(str, Enum):
+    """Rendered shape of the estimation in the model summary."""
+
     PHASES_TABLE = "phases_table"
     LINE_ITEMS = "line_items"
     NARRATIVE = "narrative"
@@ -66,9 +70,8 @@ class Phase(BaseModel):
 
 
 class EstimationResult(BaseModel):
-    """Structured estimation. The two validators below are the business rules
-    that the LLM cannot break — Instructor will re-prompt the model when one
-    of them raises.
+    """Structured estimation. Validators enforce business rules on every parse
+    (including Instructor tool output). Low-confidence scope rules still re-prompt.
 
     Field order is deliberate: ``phases`` comes BEFORE the totals so the LLM
     commits to the per-phase numbers first (autoregressive generation) and
@@ -86,12 +89,17 @@ class EstimationResult(BaseModel):
 
     @model_validator(mode="after")
     def phases_sum_matches_total(self) -> "EstimationResult":
-        phase_sum = sum(p.cost_eur for p in self.phases)
-        if phase_sum != self.total_cost_eur:
-            raise ValueError(
-                f"phases sum ({phase_sum} EUR) does not match total_cost_eur "
-                f"({self.total_cost_eur} EUR); adjust either the phases or the total"
-            )
+        """Align totals to phase sums when the model gets arithmetic wrong.
+
+        Instructor would otherwise re-prompt until ``max_retries`` and return 502
+        on long transcripts; phase costs are treated as the source of truth.
+        """
+        phase_cost = sum(p.cost_eur for p in self.phases)
+        phase_weeks = sum(p.duration_weeks for p in self.phases)
+        if phase_cost != self.total_cost_eur:
+            self.total_cost_eur = phase_cost
+        if phase_weeks != self.total_duration_weeks:
+            self.total_duration_weeks = phase_weeks
         return self
 
     @model_validator(mode="after")

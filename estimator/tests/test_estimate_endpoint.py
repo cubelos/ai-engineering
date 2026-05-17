@@ -65,6 +65,7 @@ VALID_PAYLOAD = {
 def test_valid_payload_returns_structured_response(
     client: TestClient, fake_service: FakeEstimationService
 ) -> None:
+    """POST /api/v1/estimate returns 200 with EstimationResult, prompt_version, and cached flag."""
     response = client.post("/api/v1/estimate", json=VALID_PAYLOAD)
     assert response.status_code == 200
     body = response.json()
@@ -79,6 +80,7 @@ def test_valid_payload_returns_structured_response(
 def test_endpoint_forwards_request_to_service(
     client: TestClient, fake_service: FakeEstimationService
 ) -> None:
+    """The router passes the parsed EstimationRequest through to EstimationService.estimate."""
     client.post("/api/v1/estimate", json=VALID_PAYLOAD)
     assert len(fake_service.calls) == 1
     received = fake_service.calls[0]
@@ -87,6 +89,7 @@ def test_endpoint_forwards_request_to_service(
 
 
 def test_missing_project_type_returns_422(client: TestClient, fake_service) -> None:
+    """A JSON body missing project_type is rejected with HTTP 422."""
     payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "project_type"}
     response = client.post("/api/v1/estimate", json=payload)
     assert response.status_code == 422
@@ -95,12 +98,14 @@ def test_missing_project_type_returns_422(client: TestClient, fake_service) -> N
 
 
 def test_invalid_enum_value_returns_422(client: TestClient, fake_service) -> None:
+    """An unknown enum value in the request body returns HTTP 422."""
     payload = {**VALID_PAYLOAD, "project_type": "not_a_real_enum"}
     response = client.post("/api/v1/estimate", json=payload)
     assert response.status_code == 422
 
 
 def test_short_description_returns_422(client: TestClient, fake_service) -> None:
+    """A description below the minimum length returns HTTP 422 before calling the service."""
     payload = {**VALID_PAYLOAD, "description": "too short"}
     response = client.post("/api/v1/estimate", json=payload)
     assert response.status_code == 422
