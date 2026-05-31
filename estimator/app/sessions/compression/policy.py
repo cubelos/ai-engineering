@@ -19,11 +19,16 @@ The policy is intentionally idempotent: a second call with no change to
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 
 from app.sessions.compression.anchors import AnchorDetector
 from app.sessions.compression.summarizer import CumulativeSummarizer
 from app.sessions.models import ConversationHistory, Message
+
+if TYPE_CHECKING:
+    from app.observability.turn_accumulator import TurnAccumulator
 
 log = structlog.get_logger()
 
@@ -41,7 +46,12 @@ class CompressionPolicy:
     def should_compress(self, history: ConversationHistory) -> bool:
         return len(history.messages) > history.max_turns * 2
 
-    def apply(self, history: ConversationHistory) -> None:
+    def apply(
+        self,
+        history: ConversationHistory,
+        *,
+        accumulator: TurnAccumulator | None = None,
+    ) -> None:
         """Mutate ``history`` in place: promote anchors and absorb the rest
         into the running summary. No-op when the window is under the cap."""
 
@@ -59,7 +69,7 @@ class CompressionPolicy:
             user_msg = history.messages[0]
             assistant_msg = history.messages[1]
 
-            match = self.anchor_detector.detect(user_msg)
+            match = self.anchor_detector.detect(user_msg, accumulator=accumulator)
             if match.is_anchor:
                 history.anchors.append(user_msg)
                 history.anchors.append(assistant_msg)
@@ -74,6 +84,7 @@ class CompressionPolicy:
             history.summary = self.summarizer.summarize(
                 previous_summary=history.summary,
                 evicted=evicted_for_summary,
+                accumulator=accumulator,
             )
 
         log.info(
@@ -93,6 +104,7 @@ def apply_compression(
     llm_wrapper,
     compression_model: str,
     anchor_detection_mode: str = "heuristic",
+    accumulator: TurnAccumulator | None = None,
 ) -> None:
     """Convenience wrapper used by ``EstimationService``.
 
@@ -107,4 +119,4 @@ def apply_compression(
     )
     summarizer = CumulativeSummarizer(llm_wrapper=llm_wrapper, model=compression_model)
     policy = CompressionPolicy(anchor_detector=detector, summarizer=summarizer)
-    policy.apply(history)
+    policy.apply(history, accumulator=accumulator)

@@ -20,6 +20,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from app.schemas.observation import TurnObservation
+
 
 Role = Literal["user", "assistant"]
 
@@ -171,3 +173,8 @@ class Session(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_resolved_tier: str | None = None
     last_tier_rule: str | None = None
+    last_turn_observation: TurnObservation | None = None
+
+    def anchors_text(self) -> str:
+        """Concatenate anchor message contents for drift/recall checks."""
+        return " ".join(anchor.content for anchor in self.history.anchors)

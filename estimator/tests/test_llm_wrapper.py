@@ -46,6 +46,12 @@ def test_estimate_cost_uses_pricing_table() -> None:
     assert cost == pytest.approx(0.75)
 
 
+def test_estimate_cost_resolves_dated_openai_model_id() -> None:
+    cost = _estimate_cost("gpt-4o-mini-2024-07-18", 2919, 105)
+    assert cost == pytest.approx(0.000501)
+    assert cost > 0
+
+
 def test_complete_returns_normalised_dict_and_caches(wrapper: LLMWrapper) -> None:
     fake = _fake_completion(model="gpt-4o-mini", content="hello world")
     with patch.object(wrapper.router, "completion", return_value=fake) as mocked:
@@ -143,6 +149,8 @@ def test_complete_structured_chat_forwards_messages(wrapper: LLMWrapper) -> None
     ]
 
     expected = _Answer(text="ok")
+    fake_raw = _fake_completion(model="gpt-4o-mini", input_tokens=200, output_tokens=80)
+    expected._raw_response = fake_raw
     with patch.object(
         wrapper._instructor.chat.completions, "create", return_value=expected
     ) as mocked:
@@ -158,6 +166,9 @@ def test_complete_structured_chat_forwards_messages(wrapper: LLMWrapper) -> None
     assert kwargs["model"] == "gpt-4o-mini"
     assert meta["model"] == "gpt-4o-mini"
     assert meta["provider"] == "openai"
+    assert meta["tokens_in"] == 200
+    assert meta["tokens_out"] == 80
+    assert meta["cost_usd"] > 0
     assert "latency_ms" in meta
 
 

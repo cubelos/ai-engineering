@@ -13,12 +13,17 @@ state the model has already committed to).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
 
 import structlog
 
 from app.prompts.loader import render_conversation_summary_prompt
 from app.sessions.models import Message
+
+if TYPE_CHECKING:
+    from app.observability.turn_accumulator import TurnAccumulator
 
 log = structlog.get_logger()
 
@@ -44,6 +49,7 @@ class CumulativeSummarizer:
         *,
         previous_summary: str | None,
         evicted: list[Message],
+        accumulator: TurnAccumulator | None = None,
     ) -> str:
         """Return the updated cumulative summary.
 
@@ -77,6 +83,9 @@ class CumulativeSummarizer:
                 error=str(exc)[:200],
             )
             return previous_summary or ""
+
+        if accumulator is not None:
+            accumulator.add(meta)
 
         log.info(
             "summarizer_completed",

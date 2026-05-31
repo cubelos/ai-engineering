@@ -26,3 +26,6 @@ venv/
 
 # Session guides / docs
 docs/
+
+# Stress test generated PDF fixtures
+evals/stress/fixtures/*.pdf

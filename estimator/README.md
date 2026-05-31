@@ -70,44 +70,54 @@ cd estimator
 uv run pytest
 ```
 
-La batería corre en milisegundos sin tocar APIs externas. Cubre cuatro categorías:
+La batería corre en milisegundos sin tocar APIs externas (salvo que ejecutes el stress runner con `--http` contra un servicio vivo). Cubre:
 
-- `tests/test_schemas.py` — validaciones del `EstimationRequest` (longitudes, enums, campos obligatorios).
-- `tests/test_prompts.py` — render del template `v1`: `description` aparece dentro de `<project_description>`, los bloques condicionales por `output_format` y `detail_level` solo se incluyen cuando aplica, y `StrictUndefined` falla early ante variables faltantes.
-- `tests/test_estimate_endpoint.py` — endpoint con el wrapper LLM mockeado vía `app.dependency_overrides`: comprueba el contrato 200/422, que `system_prompt` y `user_message` viajan separados, y que la respuesta lleva `prompt_version="v1"`.
-- `tests/test_llm_wrapper.py` y `tests/test_cache.py` — wrapper y cache de la Sesión 03, intactos.
+- `tests/test_schemas.py` — validaciones del `EstimationRequest`.
+- `tests/test_prompts.py` / `tests/test_prompts_v3.py` — render de templates Jinja2 versionados.
+- `tests/test_estimate_endpoint.py` — endpoint transaccional con LLM mockeado.
+- `tests/test_llm_wrapper.py` y `tests/test_cache.py` — wrapper, cost tracking y cache exact-match.
+- `tests/test_sessions_*.py` — flujo conversacional, adjuntos, ventana, metadata, ACB.
+- `tests/test_evals_*.py` — golden dataset (16 casos) y runner de evals.
+- `tests/test_turn_observed.py` — evento unificado `turn_observed` y GET enriquecido.
+- `tests/test_stress_metrics.py` — métricas de presupuesto y memory drift del stress framework.
 
 ## Estructura del proyecto
 
 ```
 estimator/
 ├── app/
-│   ├── main.py                        # FastAPI app, CORS, lifespan, /health
-│   ├── config.py                      # Settings (Pydantic Settings, .env)
-│   ├── dependencies.py                # Singletons cacheados: cache + LLMWrapper
+│   ├── main.py
+│   ├── config.py
+│   ├── dependencies.py
+│   ├── observability/
+│   │   └── turn_accumulator.py      # agrega tokens/coste/latencia por turno CAG
 │   ├── routers/
-│   │   └── estimations.py             # POST /api/v1/estimate
+│   │   ├── estimations.py           # POST /api/v1/estimate (transaccional)
+│   │   └── sessions.py              # POST/GET /sessions, estimate conversacional
 │   ├── schemas/
-│   │   └── estimation.py              # EstimationRequest, EstimationResponse, enums
-│   ├── prompts/
-│   │   ├── loader.py                  # Environment Jinja2 + render_estimation_prompt
-│   │   └── estimation/
-│   │       └── v1/
-│   │           ├── system.j2          # rol + reglas + bloques condicionales + include
-│   │           ├── user.j2            # bloque <project_description>
-│   │           └── examples.j2        # few-shot examples
+│   │   ├── estimation.py
+│   │   └── observation.py           # TurnObservation (turn_observed)
+│   ├── sessions/                    # memoria conversacional + compresión
+│   ├── prompts/                     # templates Jinja2 versionados (v1, v2, v3, …)
 │   └── services/
-│       ├── llm_wrapper.py             # LiteLLM Router con fallback y cost tracking
-│       └── cache.py                   # Redis exact-match cache
+│       ├── llm_wrapper.py           # LiteLLM + Instructor + cost tracking
+│       ├── estimation.py            # pipeline transaccional y conversacional
+│       └── cache.py
+├── evals/
+│   ├── golden_dataset.json          # 16 casos golden
+│   ├── metrics.py                   # SchemaAdherence, CostBounds, ContentRecall
+│   ├── run.py                       # uv run python -m evals.run
+│   └── stress/                      # baseline CAG (Sesión 6) — ver abajo
+│       ├── scenarios.py             # perfiles growing / pivot / contradiction
+│       ├── metrics.py               # LatencyBudget, CostBudget, MemoryDrift
+│       ├── run.py
+│       ├── results.csv              # entregable: filas por turno
+│       ├── REPORT.md                # entregable: curvas + lectura
+│       └── fixtures/build_pdfs.py   # PDFs sintéticos (regenerables)
 ├── tests/
-│   ├── test_schemas.py
-│   ├── test_prompts.py
-│   ├── test_estimate_endpoint.py
-│   ├── test_llm_wrapper.py
-│   └── test_cache.py
-├── streamlit_app.py                   # Formulario que consume /api/v1/estimate
-├── Dockerfile                         # Multi-stage con uv
-├── docker-compose.yml                 # Servicio IA + Redis
+├── streamlit_app.py
+├── Dockerfile
+├── docker-compose.yml
 └── pyproject.toml
 ```
 
@@ -142,9 +152,11 @@ A partir de la Sesión 05 el estimator deja de ser puramente transaccional y sop
 
 ```
 POST /sessions                              → 201 {"session_id": "<uuid>"}
-GET  /sessions/{session_id}                 → 200 {session_id, message_count, max_turns, metadata}
+GET  /sessions/{session_id}                 → 200 {session_id, message_count, metadata,
+                                               summary, anchors_text, last_turn_observation, …}
 POST /sessions/{session_id}/estimate        → 200 EstimationResponse
    (multipart/form-data: transcript, project_type, detail_level, output_format, attachments[])
+POST /sessions/{session_id}/estimate-acb    → 200 ACBResponse (variante Actor-Critic-Boss)
 ```
 
 Ejemplo end-to-end con httpie:
@@ -182,28 +194,122 @@ La respuesta del segundo turno integra Nimbus + React + Postgres + facturación 
 
 4. **Cachés desactivadas en el path conversacional.** Cada turno depende del historial + metadata + adjuntos: dos transcripciones idénticas en sesiones distintas **no** son la misma llamada. El método nuevo `EstimationService.estimate_conversational` por tanto no consulta ni el cache exact-match ni el semántico, y `EstimationResponse.cached` siempre es `false` en este path. El endpoint transaccional original `POST /api/v1/estimate` sigue usando las dos cachés sin cambios.
 
-5. **Ventana deslizante con `MAX_CONVERSATION_TURNS=6` por defecto.** El system prompt se regenera fresco cada turno desde el `ProjectMetadata` actual, así que no consume slot. Lo que llega al LLM en el turno N es: `[system_v2] + últimos N pares (user, assistant) + nuevo user`. Cuando el historial supera el tope, los pares más antiguos se descartan en bloque para preservar la alternancia de roles. El siguiente paso (resumen acumulativo + anclas) lo construimos en el directo.
+5. **Ventana deslizante + compresión.** Con `MAX_CONVERSATION_TURNS=6` por defecto, los pares más antiguos se promueven a **anclas** (heurística o LLM) o se absorben en un **summary acumulativo** antes de salir del contexto. El system prompt se regenera cada turno desde `ProjectMetadata` + tier (`v3`).
 
-### Variables de entorno nuevas
+6. **Tier dinámico y ACB.** `resolve_tier()` elige audiencia (executive / pm / developer / default) por reglas sobre transcript + metadata. La variante `/estimate-acb` añade Actor-Critic-Boss con traza de iteraciones en la respuesta.
+
+### Variables de entorno nuevas (Sesión 5)
 
 | Variable | Default | Notas |
 |---|---|---|
 | `MAX_CONVERSATION_TURNS` | `6` | Pares user+assistant que mantiene la ventana. |
 | `MAX_ATTACHMENT_CHARS` | `60000` | Corte por archivo extraído. Trunca, no rechaza. |
 | `METADATA_EXTRACTOR_MODEL` | `gpt-4o-mini` | Modelo de la segunda llamada por turno. |
+| `COMPRESSION_MODEL` | `gpt-4o-mini` | Summarizer de historial evictado. |
+| `ANCHOR_DETECTION_MODE` | `heuristic` | `heuristic` o `llm`. |
+| `CONVERSATIONAL_PROMPT_VERSION` | `v3` | Template conversacional (+ bloque `<audience>`). |
+| `CRITIC_MODEL` | `gpt-4o-mini` | Auditor del patrón ACB. |
+| `BOSS_MAX_ITERATIONS` | `3` | Iteraciones máximas Actor-Critic-Boss. |
 
-### Tests del Paso 7
+### Tests conversacionales
 
 ```bash
-uv run pytest tests/test_sessions_metadata.py tests/test_sessions_attachments.py tests/test_sessions_window.py -v
+uv run pytest tests/test_sessions_metadata.py tests/test_sessions_attachments.py \
+  tests/test_sessions_window.py tests/test_compression_policy.py -v
 ```
 
-Los tres tests son de integración con `TestClient`, un `FakeLLMWrapper` que captura cada llamada y devuelve resultados scripted, y un `SessionStore` aislado por test (sin singleton). Cubren los tres criterios del enunciado: dos turnos acumulan metadata, el contenido de un PDF llega al `messages` del LLM, y enviar más turnos que `MAX_CONVERSATION_TURNS` nunca infla el array de mensajes más allá del límite.
+Integración con `TestClient` + `FakeLLMWrapper` + `SessionStore` aislado por test.
 
 ### Cliente Rails
 
-El cliente Rails (`estimator-web/`) se adaptó al flujo conversacional con un nuevo controller `ChatSessionsController` (rutas `/chat_sessions`, root re-apuntado aquí), un panel lateral con el `ProjectMetadata` actual, multipart vía `faraday-multipart` y un botón "Nueva conversación" que destruye el mirror local y arranca una sesión limpia. El endpoint transaccional `EstimationsController` se mantiene operativo para la demo histórica.
+El cliente Rails (`estimator-web/`) consume el flujo conversacional vía `ChatSessionsController` (rutas `/chat_sessions`). El endpoint transaccional histórico se mantiene operativo.
 
 ---
 
-> Este proyecto forma parte del **Master en AI Engineering** y es la base sobre la que se construye en directo el resto de la Sesión 04 (output estructurado, guardrails, cache semántico) y de la Sesión 05 (compresión avanzada de memoria con anclas, tier dinámico, patrón Actor-Critic-Boss).
+## Sesión 6 — Baseline cuantitativo del CAG (stress test)
+
+Antes de introducir RAG hay que **medir** el CAG conversacional: latencia, coste acumulado y pérdida de memoria bajo conversaciones largas, adjuntos grandes y repetición. El deliverable es un reporte con números, no código de producción nuevo.
+
+### Observabilidad por turno: `turn_observed`
+
+Cada `POST /sessions/{id}/estimate` emite un único evento structlog `turn_observed` con 13 campos agregados (tokens, coste y latencia **suman** estimación + extractor de metadata + summarizer/anchors del turno):
+
+| Campo | Descripción |
+|---|---|
+| `turn_index` | 1-based dentro de la sesión |
+| `session_id` | UUID de la sesión |
+| `enriched_transcript_chars` | transcript + texto de adjuntos |
+| `attachments_total_chars` | solo la porción extraída de adjuntos |
+| `messages_in_window` | `len(history.messages)` post-compresión |
+| `anchors_count` / `summary_chars` | estado de compresión |
+| `tokens_in` / `tokens_out` / `cost_usd` / `latency_ms` | agregados del turno |
+| `cache_hit_kind` | `"none"` en path conversacional |
+| `last_resolved_tier` | tier resuelto en ese turno |
+
+El mismo payload queda en `session.last_turn_observation` y es accesible vía `GET /sessions/{id}` (junto con `summary`, `anchors_text` y `metadata` para métricas de drift).
+
+### Golden evals (regresión)
+
+```bash
+uv run python -m evals.run --mode actor
+uv run python -m evals.run --mode actor --http http://localhost:8000
+```
+
+16 casos en `evals/golden_dataset.json`; tres métricas binarias deterministas: `schema_adherence`, `cost_bounds`, `content_recall`.
+
+### Stress runner (baseline CAG)
+
+Genera PDFs sintéticos si faltan, ejecuta tres escenarios multi-turno (`growing`, `pivot`, `contradiction`) cruzados con tamaños de adjunto (0, 5, 20, 50, 100 KB) y escribe CSV + REPORT:
+
+```bash
+cd estimator
+
+# Smoke test in-process (sin API keys, FakeLLMWrapper)
+uv run python -m evals.stress.run \
+  --scenarios growing --attachment-sizes 0 --repeats 1 --max-turns 3
+
+# Baseline real contra servicio vivo (requiere OPENAI_API_KEY en .env)
+docker compose up --build   # o: uv run uvicorn app.main:app --reload
+uv run python -m evals.stress.run \
+  --http http://localhost:8000 \
+  --scenarios growing,pivot,contradiction \
+  --attachment-sizes 0,5,20,50,100 \
+  --repeats 3 \
+  --max-turns 20 \
+  --output evals/stress/results.csv \
+  --report evals/stress/REPORT.md
+```
+
+Regenerar reporte desde CSV existente (p. ej. tras corregir pricing):
+
+```bash
+uv run python -m evals.stress.run \
+  --from-csv evals/stress/results.csv \
+  --output evals/stress/results.csv \
+  --report evals/stress/REPORT.md
+```
+
+**Presupuestos SLA en métricas:** latencia ≤ 4000 ms, coste ≤ 0.05 USD/turno.
+
+**Entregables del ejercicio** (van en el repo):
+
+| Archivo | Contenido |
+|---|---|
+| `evals/stress/REPORT.md` | Tabla resumen, tres curvas (tablas), dos párrafos de lectura |
+| `evals/stress/results.csv` | Una fila por turno medido + columnas de métricas |
+
+Los PDFs de `evals/stress/fixtures/*.pdf` están en `.gitignore`; se regeneran con:
+
+```bash
+uv run python -m evals.stress.fixtures.build_pdfs
+```
+
+### Tests del stress framework
+
+```bash
+uv run pytest tests/test_stress_metrics.py tests/test_turn_observed.py -v
+```
+
+---
+
+> Este proyecto forma parte del **Master en AI Engineering**. Sesión 04: output estructurado, guardrails, cache semántico. Sesión 05: memoria conversacional, compresión (anclas + summary), tier, ACB. Sesión 06: instrumentación `turn_observed` + stress baseline CAG (`evals/stress/`) como punto de comparación previo a RAG.

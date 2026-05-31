@@ -13,12 +13,17 @@ keeps working — losing one turn of metadata refresh is acceptable.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 
 from app.prompts.loader import render_metadata_extraction_prompt
 from app.schemas.estimation import EstimationResult
 from app.services.llm_wrapper import LLMWrapper
 from app.sessions.models import ProjectMetadata
+
+if TYPE_CHECKING:
+    from app.observability.turn_accumulator import TurnAccumulator
 
 log = structlog.get_logger()
 
@@ -30,6 +35,7 @@ def update_metadata(
     result: EstimationResult,
     llm_wrapper: LLMWrapper,
     model: str,
+    accumulator: TurnAccumulator | None = None,
 ) -> ProjectMetadata:
     """Run the extractor and return ``previous.merge_with(extracted)``.
 
@@ -60,6 +66,9 @@ def update_metadata(
             error=str(exc)[:200],
         )
         return previous
+
+    if accumulator is not None:
+        accumulator.add(meta)
 
     merged = previous.merge_with(extracted)
     log.info(

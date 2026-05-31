@@ -15,6 +15,7 @@ Design notes
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, TypeVar
 
@@ -42,15 +43,42 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
 T = TypeVar("T", bound=BaseModel)
 
 
-def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    base = _normalise_model_name(model)
-    costs = MODEL_COSTS.get(base) or MODEL_COSTS.get(model) or {"input": 0.0, "output": 0.0}
-    return round((tokens_in * costs["input"] + tokens_out * costs["output"]) / 1_000_000, 6)
-
-
 def _normalise_model_name(model: str) -> str:
     """Strip provider prefixes like ``anthropic/`` that LiteLLM may emit."""
     return model.split("/", 1)[1] if "/" in model else model
+
+
+def _cost_rates_for_model(model: str) -> dict[str, float]:
+    """Resolve pricing table entry for provider-specific model ids.
+
+    OpenAI often returns dated ids (``gpt-4o-mini-2024-07-18``) that are not
+    literal keys in ``MODEL_COSTS``. We fall back to prefix / family matching
+    before defaulting to zero — an unknown model must not silently look free.
+    """
+    candidates = [_normalise_model_name(model), model]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in MODEL_COSTS:
+            return MODEL_COSTS[candidate]
+        # OpenAI dated snapshot suffix, e.g. gpt-4o-mini-2024-07-18
+        stripped = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", candidate)
+        if stripped in MODEL_COSTS:
+            return MODEL_COSTS[stripped]
+    # Longest-prefix wins: gpt-4o-mini-2024-07-18 → gpt-4o-mini
+    normalised = _normalise_model_name(model)
+    for key in sorted(MODEL_COSTS, key=len, reverse=True):
+        if normalised.startswith(key):
+            return MODEL_COSTS[key]
+    log.warning("model_cost_unknown", model=model)
+    return {"input": 0.0, "output": 0.0}
+
+
+def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    costs = _cost_rates_for_model(model)
+    return round((tokens_in * costs["input"] + tokens_out * costs["output"]) / 1_000_000, 6)
 
 
 def _provider_from_model(model: str) -> str:
@@ -60,6 +88,79 @@ def _provider_from_model(model: str) -> str:
     if name.startswith("gpt") or name.startswith("o1") or name.startswith("o3"):
         return "openai"
     return "unknown"
+
+
+def _usage_from_response(response: Any) -> tuple[int, int]:
+    """Extract (input_tokens, output_tokens) from a LiteLLM/OpenAI response."""
+    if response is None:
+        return 0, 0
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage")
+    if usage is None:
+        return 0, 0
+    if isinstance(usage, dict):
+        input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        return int(input_tokens), int(output_tokens)
+    input_tokens = getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0
+    output_tokens = (
+        getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0
+    )
+    return int(input_tokens), int(output_tokens)
+
+
+def _raw_response_from_instructor_result(result: Any) -> Any:
+    """Best-effort access to the underlying completion behind an Instructor model."""
+    for attr in ("_raw_response", "raw_response", "_response"):
+        raw = getattr(result, attr, None)
+        if raw is not None:
+            return raw
+    return None
+
+
+def _aggregate_usage_from_instructor_result(result: Any) -> tuple[int, int, Any | None]:
+    """Sum token usage across Instructor retry attempts when available."""
+    total_in = 0
+    total_out = 0
+    last_raw: Any | None = None
+
+    attempts = getattr(result, "_attempts", None)
+    if attempts:
+        for attempt in attempts:
+            raw = getattr(attempt, "completion", None) or getattr(attempt, "response", None)
+            if raw is None:
+                continue
+            last_raw = raw
+            tin, tout = _usage_from_response(raw)
+            total_in += tin
+            total_out += tout
+        if total_in or total_out:
+            return total_in, total_out, last_raw
+
+    last_raw = _raw_response_from_instructor_result(result)
+    tin, tout = _usage_from_response(last_raw)
+    return tin, tout, last_raw
+
+
+def _meta_from_structured_result(
+    result: Any, *, target_model: str, latency_ms: int
+) -> dict[str, Any]:
+    """Build observability meta for Instructor structured calls."""
+    tokens_in, tokens_out, raw = _aggregate_usage_from_instructor_result(result)
+    model = _normalise_model_name(getattr(raw, "model", None) or target_model)
+    cost_usd = _estimate_cost(model, tokens_in, tokens_out)
+    if (tokens_in or tokens_out) and cost_usd == 0.0:
+        # Dated / unknown id on the response — price against configured target.
+        cost_usd = _estimate_cost(target_model, tokens_in, tokens_out)
+    return {
+        "model": model,
+        "provider": _provider_from_model(model),
+        "latency_ms": latency_ms,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost_usd,
+    }
 
 
 class LLMWrapper:
@@ -234,16 +335,17 @@ class LLMWrapper:
             raise
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        meta = {
-            "model": _normalise_model_name(target_model),
-            "provider": _provider_from_model(target_model),
-            "latency_ms": latency_ms,
-        }
+        meta = _meta_from_structured_result(
+            result, target_model=target_model, latency_ms=latency_ms
+        )
         log.info(
             "llm_structured_chat_completed",
             model=meta["model"],
             provider=meta["provider"],
             latency_ms=latency_ms,
+            tokens_in=meta["tokens_in"],
+            tokens_out=meta["tokens_out"],
+            cost_usd=meta["cost_usd"],
         )
         return result, meta
 
@@ -305,16 +407,17 @@ class LLMWrapper:
             raise
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        meta = {
-            "model": _normalise_model_name(target_model),
-            "provider": _provider_from_model(target_model),
-            "latency_ms": latency_ms,
-        }
+        meta = _meta_from_structured_result(
+            result, target_model=target_model, latency_ms=latency_ms
+        )
         log.info(
             "llm_structured_call_completed",
             model=meta["model"],
             provider=meta["provider"],
             latency_ms=latency_ms,
+            tokens_in=meta["tokens_in"],
+            tokens_out=meta["tokens_out"],
+            cost_usd=meta["cost_usd"],
         )
         return result, meta
 

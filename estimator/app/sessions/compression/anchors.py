@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 from pydantic import BaseModel, Field
 
 from app.sessions.models import Message
+
+if TYPE_CHECKING:
+    from app.observability.turn_accumulator import TurnAccumulator
 
 log = structlog.get_logger()
 
@@ -85,10 +88,15 @@ class AnchorDetector:
         self.llm_wrapper = llm_wrapper
         self.llm_model = llm_model
 
-    def detect(self, message: Message) -> AnchorMatch:
+    def detect(
+        self,
+        message: Message,
+        *,
+        accumulator: TurnAccumulator | None = None,
+    ) -> AnchorMatch:
         """Return the anchor decision plus the rules that triggered it."""
         if self.mode == "llm":
-            return self._detect_llm(message)
+            return self._detect_llm(message, accumulator=accumulator)
         return self._detect_heuristic(message)
 
     # -- implementations -------------------------------------------------
@@ -107,7 +115,12 @@ class AnchorDetector:
             return AnchorMatch(is_anchor=True, matched_rules=matched)
         return AnchorMatch(is_anchor=False)
 
-    def _detect_llm(self, message: Message) -> AnchorMatch:
+    def _detect_llm(
+        self,
+        message: Message,
+        *,
+        accumulator: TurnAccumulator | None = None,
+    ) -> AnchorMatch:
         if self.llm_wrapper is None:
             # Fallback: behave like heuristic if no wrapper was wired.
             return self._detect_heuristic(message)
@@ -120,7 +133,7 @@ class AnchorDetector:
         )
         user_message = f"User turn:\n{message.content}"
         try:
-            classification, _meta = self.llm_wrapper.complete_structured_chat(
+            classification, meta = self.llm_wrapper.complete_structured_chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
@@ -137,6 +150,8 @@ class AnchorDetector:
                 error=str(exc)[:200],
             )
             return self._detect_heuristic(message)
+        if accumulator is not None:
+            accumulator.add(meta)
         if classification.is_anchor:
             log.info("anchor_detected", strategy="llm", reason=classification.reason[:120])
             return AnchorMatch(is_anchor=True, matched_rules=[f"llm:{classification.reason[:60]}"])

@@ -33,6 +33,8 @@ from app.guardrails.input import check_input
 from app.guardrails.output import enforce_scope_response
 from app.prompts import render_estimation_prompt
 from app.prompts.loader import render_conversational_prompt
+from app.observability.turn_accumulator import TurnAccumulator
+from app.schemas.observation import TurnObservation
 from app.schemas.critic import CriticFeedback
 from app.schemas.estimation import (
     ACBResponse,
@@ -177,6 +179,7 @@ class EstimationService:
         detail_level: DetailLevel,
         output_format: OutputFormat,
         tier: Tier | None = None,
+        attachments_total_chars: int = 0,
     ) -> EstimationResponse:
         """Multi-turn estimation pipeline (Session 5).
 
@@ -231,10 +234,12 @@ class EstimationService:
         )
 
         # 4. LLM call with Instructor + Pydantic validators.
+        accumulator = TurnAccumulator()
         result, meta = self.llm_wrapper.complete_structured_chat(
             messages=messages,
             response_model=EstimationResult,
         )
+        accumulator.add(meta)
         log.info(
             "estimation_conversational_generated",
             session_id=session.session_id,
@@ -256,6 +261,7 @@ class EstimationService:
             llm_wrapper=self.llm_wrapper,
             compression_model=self.compression_model,
             anchor_detection_mode=self.anchor_detection_mode,
+            accumulator=accumulator,
         )
 
         # 7. Second-pass extractor refreshes ProjectMetadata. Failure is
@@ -266,7 +272,27 @@ class EstimationService:
             result=result,
             llm_wrapper=self.llm_wrapper,
             model=self.metadata_extractor_model,
+            accumulator=accumulator,
         )
+
+        turn_index = len(session.history.messages) // 2
+        observation = TurnObservation(
+            turn_index=turn_index,
+            session_id=session.session_id,
+            enriched_transcript_chars=len(transcript),
+            attachments_total_chars=attachments_total_chars,
+            messages_in_window=len(session.history.messages),
+            anchors_count=len(session.history.anchors),
+            summary_chars=len(session.history.summary or ""),
+            tokens_in=accumulator.tokens_in,
+            tokens_out=accumulator.tokens_out,
+            cost_usd=accumulator.cost_usd,
+            latency_ms=accumulator.latency_ms,
+            cache_hit_kind="none",
+            last_resolved_tier=session.last_resolved_tier,
+        )
+        session.last_turn_observation = observation
+        log.info("turn_observed", **observation.model_dump())
 
         return EstimationResponse(
             result=result,
